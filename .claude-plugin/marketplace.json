@@ -1,0 +1,13 @@
+{
+  "name": "dex-team",
+  "owner": {"name": "DEX-2"},
+  "metadata": {"description": "Local DEX team Claude Code plugins"},
+  "plugins": [{
+    "name": "dex-workers",
+    "source": "./",
+    "description": "Safe Codex and Antigravity external workers for Claude Code",
+    "version": "1.0.0",
+    "category": "developer-tools",
+    "strict": true
+  }]
+}

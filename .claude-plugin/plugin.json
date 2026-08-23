@@ -1,0 +1,8 @@
+{
+  "name": "dex-workers",
+  "version": "1.0.0",
+  "description": "Run Codex CLI and Antigravity agy as safe external Claude Code workers",
+  "author": {"name": "DEX-2"},
+  "license": "Proprietary",
+  "keywords": ["claude-code", "codex", "antigravity", "workers", "routing"]
+}
