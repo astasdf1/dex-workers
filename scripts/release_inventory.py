@@ -12,12 +12,15 @@ RELEASE_FILES = (
     "README.md",
     "bin/dex-workers",
     "scripts/dex_workers.py",
+    "scripts/setup.py",
     "skills/cancel/SKILL.md",
     "skills/delegate/SKILL.md",
     "skills/doctor/SKILL.md",
     "skills/review/SKILL.md",
     "skills/run/SKILL.md",
     "skills/status/SKILL.md",
+    "skills/setup/SKILL.md",
+    "skills/setup-project/SKILL.md",
 )
 
 

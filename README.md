@@ -45,4 +45,27 @@ claude plugin marketplace add /absolute/path/to/plugins/dex-workers
 claude plugin install dex-workers@dex-team --scope user
 ```
 
+플러그인 설치는 기능만 활성화하며 사용자 지침이나 프로젝트 파일을 몰래 변경하지 않습니다. 전역 기본 위임 정책(동시 최대 5개)은 Claude Code에서 `/dex-workers:setup`을 실행하거나 아래처럼 명시적으로 설치합니다. 기존 `~/.claude/CLAUDE.md`의 다른 내용은 보존되고 변경 전 백업이 생성됩니다.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-user --dry-run
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-user
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-user --check
+```
+
+제거하려면 가장 최근 `~/.claude/backups/CLAUDE.md.before-dex-workers.*`를 검토해 복원하거나, `dex-workers:default-delegation BEGIN/END` 관리 구간만 제거합니다. 플러그인 제거가 사용자 지침을 자동 삭제하지는 않습니다.
+
+### Portable minimal harness
+
+플러그인에는 프로젝트 중립적인 최소 하네스가 포함됩니다. 프로젝트마다 명시적으로 `/dex-workers:setup-project`를 실행해야 하며, 플러그인 설치만으로 `.harness`가 생성되지는 않습니다. 생성물은 `.harness/JOURNAL.md`, `plans/`, `runs/`, `templates/run.md`, `README.md`, `config`, `verify`입니다. 기존 `CLAUDE.md`, `AGENTS.md`, `.harness` 파일을 덮어쓰지 않고 충돌 시 아무것도 변경하지 않습니다.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-project --target "$PWD" --dry-run
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-project --target "$PWD"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-project --target "$PWD" --check
+./.harness/verify
+```
+
+`.harness/config`의 `VERIFY_COMMAND`를 프로젝트의 실제 lint/test/build 명령으로 설정하십시오. 초기화 과정은 네트워크나 패키지 설치를 수행하지 않습니다.
+
 For an auditable team handoff, use `scripts/install-folder.py <destination>` or create a deterministic archive with `scripts/package.py --out <outside-plugin-dir>/dex-workers.tar.gz`. Both tools ship only the fixed release inventory and refuse symbolic links or special source files.

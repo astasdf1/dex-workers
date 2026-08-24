@@ -79,12 +79,46 @@ class DexWorkersTest(unittest.TestCase):
         self.assertEqual(manifest["name"], "dex-workers")
         self.assertEqual(market["plugins"][0]["name"], "dex-workers")
         self.assertEqual({p.parent.name for p in (ROOT / "skills").glob("*/SKILL.md")},
-                         {"run", "review", "doctor", "status", "cancel", "delegate"})
+                         {"run", "review", "doctor", "status", "cancel", "delegate", "setup", "setup-project"})
         delegate = (ROOT / "skills/delegate/SKILL.md").read_text()
         self.assertIn("dex-workers select", delegate)
         self.assertIn("CLAUDE_NATIVE", delegate)
         self.assertIn("Task", delegate)
         self.assertIn("--role <role>", delegate)
+
+    def test_setup_defaults_upgrade_backup_idempotent_and_malformed(self):
+        setup = ROOT / "scripts/setup.py"
+        with tempfile.TemporaryDirectory() as raw:
+            home=Path(raw); claude=home/".claude"; claude.mkdir()
+            config=claude/"CLAUDE.md"
+            config.write_text("prefix\n\n## Default Delegation Protocol\n\nRun at most 3 delegated subtasks concurrently.\n\n<!-- USER:PERSISTENT:END -->\n")
+            run=lambda *a: subprocess.run([sys.executable,str(setup),"setup-user","--home",str(home),*a],text=True,capture_output=True)
+            self.assertEqual(run("--dry-run").returncode,0); self.assertIn("at most 3",config.read_text())
+            self.assertEqual(run().returncode,0); current=config.read_text()
+            self.assertIn("at most 5 delegated",current); self.assertEqual(current.count("dex-workers:default-delegation BEGIN"),1)
+            backups=list((claude/"backups").glob("CLAUDE.md.before-dex-workers.*")); self.assertEqual(len(backups),1)
+            self.assertIn("at most 3",backups[0].read_text())
+            self.assertEqual(run("--check").returncode,0); self.assertEqual(run().returncode,0); self.assertEqual(config.read_text(),current)
+            config.write_text("<!-- dex-workers:default-delegation BEGIN -->\nbroken")
+            self.assertEqual(run().returncode,2); self.assertEqual(config.read_text(),"<!-- dex-workers:default-delegation BEGIN -->\nbroken")
+
+    def test_project_harness_fresh_check_idempotent_conflict_and_symlink(self):
+        setup=ROOT/"scripts/setup.py"
+        with tempfile.TemporaryDirectory() as raw:
+            project=Path(raw)/"project"; project.mkdir(); (project/"CLAUDE.md").write_text("mine")
+            run=lambda *a: subprocess.run([sys.executable,str(setup),"setup-project","--target",str(project),*a],text=True,capture_output=True)
+            self.assertEqual(run("--dry-run").returncode,0); self.assertFalse((project/".harness").exists())
+            self.assertEqual(run().returncode,0); self.assertEqual(run("--check").returncode,0)
+            self.assertEqual((project/"CLAUDE.md").read_text(),"mine"); self.assertTrue((project/".harness/verify").stat().st_mode & stat.S_IXUSR)
+            self.assertEqual(run().returncode,0)
+            (project/".harness/config").write_text("custom")
+            before={p.relative_to(project):p.read_bytes() for p in project.rglob("*") if p.is_file()}
+            self.assertEqual(run().returncode,2)
+            self.assertEqual(before,{p.relative_to(project):p.read_bytes() for p in project.rglob("*") if p.is_file()})
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw); outside=root/"outside"; outside.mkdir(); project=root/"project"; project.symlink_to(outside, target_is_directory=True)
+            result=subprocess.run([sys.executable,str(setup),"setup-project","--target",str(project)],text=True,capture_output=True)
+            self.assertEqual(result.returncode,2); self.assertEqual(list(outside.iterdir()),[])
 
     def test_select_returns_claude_native_without_ready_provider(self):
         with tempfile.TemporaryDirectory() as raw:
