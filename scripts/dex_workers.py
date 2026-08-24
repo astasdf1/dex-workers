@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 CACHE_SCHEMAS = frozenset({"dex.provider_usage_cache.v1", "dex.provider_usage_cache.v2", "dex.provider_usage_cache.v3"})
 RESULT_SCHEMA = "dex.external_worker_result.v1"
 SELECTION_SCHEMA = "dex.worker_selection.v1"
@@ -226,6 +226,44 @@ def choose_delegation(probes: dict[str, dict[str, Any]], usage: dict[str, Any] |
     return CLAUDE_NATIVE, "no_eligible_external_provider_or_quota"
 
 
+def quota_eligible(provider: str, usage: dict[str, Any] | None) -> bool:
+    """Unknown quota remains eligible; only a reliable known value below 5% is excluded."""
+    value = remaining(provider, usage)
+    return value is None or value >= 5.0
+
+
+def choose_for_role(role: str, mode: str, requested: str,
+                    probes: dict[str, dict[str, Any]], usage: dict[str, Any] | None,
+                    routing_key: str = "") -> tuple[list[str], str]:
+    ready = {
+        CLAUDE_NATIVE: quota_eligible("claude", usage),
+        "codex": probes["codex"]["enabled"] and quota_eligible("codex", usage),
+        "agy": probes["agy"]["enabled"] and quota_eligible("agy", usage),
+    }
+    if requested != "auto":
+        name = CLAUDE_NATIVE if requested == "claude" else requested
+        return ([name], "explicit") if ready.get(name, False) else ([CLAUDE_NATIVE], f"{requested}_unavailable")
+    if mode == "multi":
+        selected = [name for name in (CLAUDE_NATIVE, "codex", "agy") if ready[name]]
+        return (selected or [CLAUDE_NATIVE], "multi_perspective_all_eligible")
+    if role == "review":
+        if ready["agy"]:
+            return ["agy"], "review_prefers_antigravity"
+        if ready["codex"]:
+            return ["codex"], "review_antigravity_unavailable"
+        return [CLAUDE_NATIVE], "review_external_unavailable"
+    if role == "audit":
+        eligible = {name: data for name, data in probes.items()}
+        eligible["agy"] = {**eligible["agy"], "enabled": False}
+        selection, reason = choose_delegation(eligible, usage, routing_key)
+        return [selection], f"audit_primary:{reason}"
+    # Implementation/build/fix tasks avoid Antigravity in normal auto routing.
+    eligible = {name: data for name, data in probes.items()}
+    eligible["agy"] = {**eligible["agy"], "enabled": False}
+    selection, reason = choose_delegation(eligible, usage, routing_key)
+    return [selection], reason
+
+
 def result(status: str, **values: Any) -> dict[str, Any]:
     return {"schema_version": RESULT_SCHEMA, "status": status, **values}
 
@@ -344,10 +382,13 @@ def select_worker(args: argparse.Namespace) -> int:
     """Select a delegation target without launching it or intercepting a prompt."""
     usage = load_usage(args.home)
     probes = {name: probe(name, args.probe_timeout) for name in PROVIDERS}
-    selection, reason = choose_delegation(probes, usage, args.task)
+    selections, reason = choose_for_role(args.role, args.mode, args.provider, probes, usage, args.task)
     print(json.dumps({
         "schema_version": SELECTION_SCHEMA,
-        "selection": selection,
+        "selection": selections[0],
+        "selections": selections,
+        "role": args.role,
+        "mode": args.mode,
         "route_reason": reason,
     }, ensure_ascii=False, indent=2))
     return 0
@@ -395,6 +436,9 @@ def parser() -> argparse.ArgumentParser:
     q = sub.add_parser("select", help="select a delegation target without launching it")
     q.set_defaults(func=select_worker)
     q.add_argument("--task", default="", help="bounded subtask used only as a deterministic routing key")
+    q.add_argument("--role", choices=("review", "audit", "implementation"), default="implementation")
+    q.add_argument("--mode", choices=("single", "multi"), default="single")
+    q.add_argument("--provider", choices=("auto", "claude", *PROVIDERS), default="auto")
     q = sub.add_parser("cancel"); q.add_argument("run_id"); q.set_defaults(func=cancel)
     return p
 

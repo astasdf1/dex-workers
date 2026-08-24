@@ -11,6 +11,41 @@ def load_module():
 
 
 class DexWorkersTest(unittest.TestCase):
+    def test_review_role_routing_and_five_percent_boundary(self):
+        module = load_module(); probes = {"codex":{"enabled":True}, "agy":{"enabled":True}}
+        usage = {"schema_version":"dex.provider_usage_cache.v3", "claude":{"remaining_percent":90},
+                 "openai":{"remaining_percent":99}, "antigravity":{"readiness":"ready"}}
+        self.assertEqual(module.choose_for_role("review", "single", "auto", probes, usage)[0], ["agy"])
+        usage["openai"]["remaining_percent"] = 4.999
+        probes["agy"]["enabled"] = False
+        self.assertEqual(module.choose_for_role("review", "single", "auto", probes, usage)[0], [module.CLAUDE_NATIVE])
+        usage["openai"]["remaining_percent"] = 5
+        self.assertEqual(module.choose_for_role("review", "single", "auto", probes, usage)[0], ["codex"])
+
+    def test_multi_review_includes_all_eligible_and_unknown_agy(self):
+        module = load_module(); probes = {"codex":{"enabled":True}, "agy":{"enabled":True}}
+        usage = {"schema_version":"dex.provider_usage_cache.v3", "claude":{"remaining_percent":5},
+                 "openai":{"remaining_percent":5}, "antigravity":{"readiness":"ready"}}
+        selected, reason = module.choose_for_role("review", "multi", "auto", probes, usage)
+        self.assertEqual(selected, [module.CLAUDE_NATIVE, "codex", "agy"])
+        self.assertEqual(reason, "multi_perspective_all_eligible")
+        usage["claude"]["remaining_percent"] = 4.9
+        usage["openai"]["remaining_percent"] = 4.9
+        self.assertEqual(module.choose_for_role("review", "multi", "auto", probes, usage)[0], ["agy"])
+
+    def test_audit_and_implementation_do_not_auto_select_agy(self):
+        module = load_module(); probes = {"codex":{"enabled":True}, "agy":{"enabled":True}}
+        usage = {"schema_version":"dex.provider_usage_cache.v3", "claude":{"remaining_percent":80},
+                 "openai":{"remaining_percent":70}, "antigravity":{"readiness":"ready"}}
+        self.assertNotEqual(module.choose_for_role("audit", "single", "auto", probes, usage)[0], ["agy"])
+        self.assertNotEqual(module.choose_for_role("implementation", "single", "auto", probes, usage)[0], ["agy"])
+        self.assertEqual(module.choose_for_role("implementation", "single", "agy", probes, usage)[0], ["agy"])
+
+    def test_review_skill_requires_all_three_and_anchored_synthesis(self):
+        text = (ROOT / "skills/review/SKILL.md").read_text()
+        for token in ("Claude via Task", "Codex", "Antigravity", "below 5%", "supplemental/unconfirmed"):
+            self.assertIn(token, text)
+
     def test_usage_cache_v2_is_accepted(self):
         with tempfile.TemporaryDirectory() as raw:
             home=Path(raw); cache=home/".cache/dex-usage/usage.json"; cache.parent.mkdir(parents=True)
@@ -46,6 +81,7 @@ class DexWorkersTest(unittest.TestCase):
         self.assertIn("dex-workers select", delegate)
         self.assertIn("CLAUDE_NATIVE", delegate)
         self.assertIn("Task", delegate)
+        self.assertIn("--role <role>", delegate)
 
     def test_select_returns_claude_native_without_ready_provider(self):
         with tempfile.TemporaryDirectory() as raw:
