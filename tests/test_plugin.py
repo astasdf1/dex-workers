@@ -14,15 +14,15 @@ class DexWorkersTest(unittest.TestCase):
     def test_usage_cache_v2_is_accepted(self):
         with tempfile.TemporaryDirectory() as raw:
             home=Path(raw); cache=home/".cache/dex-usage/usage.json"; cache.parent.mkdir(parents=True)
-            cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v2","openai":{"remaining_percent":70,"windows":{"five_hour":{"remaining_percent":70},"one_week":{"remaining_percent":80}}},"gemini":{"remaining_percent":20}}))
+            cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v2","openai":{"remaining_percent":70,"windows":{"five_hour":{"remaining_percent":70},"one_week":{"remaining_percent":80}}},"retired_google_provider":{"remaining_percent":20}}))
             module=load_module(); data=module.load_usage(home)
             self.assertEqual(data["schema_version"],"dex.provider_usage_cache.v2"); self.assertEqual(module.remaining("codex",data),70)
             self.assertIsNone(module.remaining("agy", data))
 
-    def test_usage_cache_v3_and_antigravity_never_use_gemini_quota(self):
+    def test_usage_cache_v3_and_antigravity_never_use_retired_quota(self):
         with tempfile.TemporaryDirectory() as raw:
             home=Path(raw); cache=home/".cache/dex-usage/usage.json"; cache.parent.mkdir(parents=True)
-            cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v3","gemini":{"remaining_percent":99},"antigravity":{"readiness":"ready"}}))
+            cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v3","retired_google_provider":{"remaining_percent":99},"antigravity":{"readiness":"ready"}}))
             module=load_module(); data=module.load_usage(home)
             self.assertIsNone(module.remaining("agy",data))
     def call(self, home: Path, *args: str, path: str = "/usr/bin:/bin"):
@@ -68,7 +68,7 @@ class DexWorkersTest(unittest.TestCase):
                 else exit 9; fi
             ''')
             cache = home / ".cache/dex-usage/usage.json"; cache.parent.mkdir(parents=True)
-            cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v1", "openai":{"remaining_percent":70}, "gemini":{"remaining_percent":20}}))
+            cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v1", "openai":{"remaining_percent":70}, "retired_google_provider":{"remaining_percent":20}}))
             result = self.call(home, "select", path=str(tools)+":/usr/bin:/bin")
             data = json.loads(result.stdout)
             self.assertEqual(data["selection"], "codex")
@@ -88,7 +88,7 @@ class DexWorkersTest(unittest.TestCase):
             cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v1",
                                          "claude":{"remaining_percent":90},
                                          "openai":{"remaining_percent":70},
-                                         "gemini":{"remaining_percent":20}}))
+                                         "retired_google_provider":{"remaining_percent":20}}))
             result = self.call(home, "select", path=str(tools)+":/usr/bin:/bin")
             data = json.loads(result.stdout)
             self.assertEqual(data["selection"], "CLAUDE_NATIVE")
@@ -136,7 +136,7 @@ class DexWorkersTest(unittest.TestCase):
                 else printf '%s\\n' "$@" > "{capture}"; echo agy; fi
             ''')
             cache = home / ".cache/dex-usage/usage.json"; cache.parent.mkdir(parents=True)
-            cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v1", "openai":{"remaining_percent":10}, "gemini":{"remaining_percent":80}}))
+            cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v1", "openai":{"remaining_percent":10}, "retired_google_provider":{"remaining_percent":80}}))
             result = self.call(home, "run", "inspect", "--provider", "agy", path=str(tools)+":/usr/bin:/bin")
             data = json.loads(result.stdout)
             self.assertEqual(data["provider"], "agy")
@@ -154,7 +154,7 @@ class DexWorkersTest(unittest.TestCase):
                 else echo agy; fi
             ''')
             cache = home / ".cache/dex-usage/usage.json"; cache.parent.mkdir(parents=True)
-            cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v1", "openai":{"remaining_percent":10}, "gemini":{"remaining_percent":80}}))
+            cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v1", "openai":{"remaining_percent":10}, "retired_google_provider":{"remaining_percent":80}}))
             result = self.call(home, "run", "inspect", path=str(tools)+":/usr/bin:/bin")
             data = json.loads(result.stdout); self.assertEqual(data["provider"], "codex"); self.assertIn("10", data["route_reason"])
 

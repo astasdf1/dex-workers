@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 CACHE_SCHEMAS = frozenset({"dex.provider_usage_cache.v1", "dex.provider_usage_cache.v2", "dex.provider_usage_cache.v3"})
 RESULT_SCHEMA = "dex.external_worker_result.v1"
 SELECTION_SCHEMA = "dex.worker_selection.v1"
@@ -158,8 +158,8 @@ def probe(provider: str, timeout: float = 5.0) -> dict[str, Any]:
 
 
 def remaining(provider: str, usage: dict[str, Any] | None) -> float | None:
-    # Antigravity has no reliable quota contract. Never score it using legacy
-    # Gemini/Code Assist quota; readiness is handled by probe().
+    # Antigravity has no reliable quota contract. Never score it using another
+    # product's quota; readiness is handled by probe().
     key = {"codex": "openai", "agy": "antigravity", "claude": "claude"}[provider]
     row = usage.get(key) if usage else None
     value = row.get("remaining_percent") if isinstance(row, dict) else None
