@@ -69,7 +69,7 @@ class DexWorkersTest(unittest.TestCase):
             ''')
             cache = home / ".cache/dex-usage/usage.json"; cache.parent.mkdir(parents=True)
             cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v1", "openai":{"remaining_percent":70}, "retired_google_provider":{"remaining_percent":20}}))
-            result = self.call(home, "select", path=str(tools)+":/usr/bin:/bin")
+            result = self.call(home, "select", "--task", "known-route", path=str(tools)+":/usr/bin:/bin")
             data = json.loads(result.stdout)
             self.assertEqual(data["selection"], "codex")
             self.assertIn("70", data["route_reason"])
@@ -89,7 +89,7 @@ class DexWorkersTest(unittest.TestCase):
                                          "claude":{"remaining_percent":90},
                                          "openai":{"remaining_percent":70},
                                          "retired_google_provider":{"remaining_percent":20}}))
-            result = self.call(home, "select", path=str(tools)+":/usr/bin:/bin")
+            result = self.call(home, "select", "--task", "known-route", path=str(tools)+":/usr/bin:/bin")
             data = json.loads(result.stdout)
             self.assertEqual(data["selection"], "CLAUDE_NATIVE")
             self.assertIn("90", data["route_reason"])
@@ -155,8 +155,25 @@ class DexWorkersTest(unittest.TestCase):
             ''')
             cache = home / ".cache/dex-usage/usage.json"; cache.parent.mkdir(parents=True)
             cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v1", "openai":{"remaining_percent":10}, "retired_google_provider":{"remaining_percent":80}}))
-            result = self.call(home, "run", "inspect", path=str(tools)+":/usr/bin:/bin")
+            result = self.call(home, "run", "known-route", path=str(tools)+":/usr/bin:/bin")
             data = json.loads(result.stdout); self.assertEqual(data["provider"], "codex"); self.assertIn("10", data["route_reason"])
+
+    def test_unknown_antigravity_quota_is_deterministically_rotated(self):
+        module = load_module()
+        probes = {
+            "codex": {"enabled": True},
+            "agy": {"enabled": True},
+        }
+        usage = {
+            "schema_version": "dex.provider_usage_cache.v3",
+            "claude": {"remaining_percent": 90},
+            "openai": {"remaining_percent": 70},
+            "antigravity": {"readiness": "ready"},
+        }
+        routes = {module.choose_delegation(probes, usage, key)[0] for key in ("a", "known-route")}
+        self.assertEqual(routes, {"agy", "CLAUDE_NATIVE"})
+        self.assertEqual(module.choose_delegation(probes, usage, "a"),
+                         module.choose_delegation(probes, usage, "a"))
 
     def test_unsupported_agy_and_unsafe_cache_are_ignored(self):
         with tempfile.TemporaryDirectory() as raw:

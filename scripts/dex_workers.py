@@ -12,11 +12,12 @@ import sys
 import time
 import re
 import math
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 CACHE_SCHEMAS = frozenset({"dex.provider_usage_cache.v1", "dex.provider_usage_cache.v2", "dex.provider_usage_cache.v3"})
 RESULT_SCHEMA = "dex.external_worker_result.v1"
 SELECTION_SCHEMA = "dex.worker_selection.v1"
@@ -169,7 +170,15 @@ def remaining(provider: str, usage: dict[str, Any] | None) -> float | None:
     return min(100.0, max(0.0, number)) if math.isfinite(number) else None
 
 
-def choose(requested: str, probes: dict[str, dict[str, Any]], usage: dict[str, Any] | None) -> tuple[str | None, str]:
+def deterministic_pick(names: list[str], routing_key: str) -> str:
+    """Pick stably without pretending an unknown provider has numeric quota."""
+    ordered = sorted(names)
+    digest = hashlib.sha256(routing_key.encode("utf-8", errors="replace")).digest()
+    return ordered[int.from_bytes(digest[:8], "big") % len(ordered)]
+
+
+def choose(requested: str, probes: dict[str, dict[str, Any]], usage: dict[str, Any] | None,
+           routing_key: str = "") -> tuple[str | None, str]:
     ready = [name for name in PROVIDERS if probes[name]["enabled"]]
     if requested != "auto":
         return (requested, "explicit") if requested in ready else (None, f"{requested}_unavailable")
@@ -177,24 +186,38 @@ def choose(requested: str, probes: dict[str, dict[str, Any]], usage: dict[str, A
         return None, "no_supported_authenticated_provider"
     scored = [(remaining(name, usage), name) for name in ready]
     known = [(score, name) for score, name in scored if score is not None and score > 0]
+    unknown = [name for score, name in scored if score is None]
+    if known and unknown:
+        score, best_known = max(known)
+        name = deterministic_pick([best_known, *unknown], routing_key)
+        reason = ("unknown_quota_rotation" if name in unknown
+                  else f"dex_usage_advisory:{score:g}%:unknown_quota_rotation")
+        return name, reason
     if known:
         score, name = max(known)
         return name, f"dex_usage_advisory:{score:g}%"
-    unknown = [name for score, name in scored if score is None]
     if unknown:
         return unknown[0], "ready_provider_without_quota_data"
     return None, "all_ready_providers_quota_exhausted"
 
 
-def choose_delegation(probes: dict[str, dict[str, Any]], usage: dict[str, Any] | None) -> tuple[str, str]:
+def choose_delegation(probes: dict[str, dict[str, Any]], usage: dict[str, Any] | None,
+                      routing_key: str = "") -> tuple[str, str]:
     """Select one subagent route; native Claude is always eligible."""
     candidates = ["claude", *(name for name in PROVIDERS if probes[name]["enabled"])]
     scored = [(remaining(name, usage), name) for name in candidates]
     known = [(score, name) for score, name in scored if score is not None and score > 0]
+    unknown_external = [name for score, name in scored if name != "claude" and score is None]
+    if known and unknown_external:
+        score, best_known = max(known)
+        name = deterministic_pick([best_known, *unknown_external], routing_key)
+        selection = CLAUDE_NATIVE if name == "claude" else name
+        reason = ("unknown_quota_rotation" if name in unknown_external
+                  else f"dex_usage_advisory:{score:g}%:unknown_quota_rotation")
+        return selection, reason
     if known:
         score, name = max(known)
         return (CLAUDE_NATIVE if name == "claude" else name), f"dex_usage_advisory:{score:g}%"
-    unknown_external = [name for score, name in scored if name != "claude" and score is None]
     if unknown_external:
         return unknown_external[0], "ready_provider_without_quota_data"
     ready_external = [name for name in PROVIDERS if probes[name]["enabled"]]
@@ -239,7 +262,7 @@ def run_worker(args: argparse.Namespace) -> int:
         return emit(result("error", error="invalid_working_directory"))
     probes = {name: probe(name, args.probe_timeout) for name in PROVIDERS}
     usage = load_usage(args.home)
-    provider, route_reason = choose(args.provider, probes, usage)
+    provider, route_reason = choose(args.provider, probes, usage, args.prompt)
     if provider is None:
         return emit(result(FALLBACK, action=args.action, reason=route_reason, next_action="continue_in_claude",
                            message="No eligible external worker; Claude should continue locally."))
@@ -298,7 +321,7 @@ def run_worker(args: argparse.Namespace) -> int:
 def status(args: argparse.Namespace) -> int:
     usage = load_usage(args.home)
     probes = {name: probe(name, args.probe_timeout) for name in PROVIDERS}
-    ready, reason = choose_delegation(probes, usage)
+    ready, reason = choose_delegation(probes, usage, "status")
     active = []
     root = state_root(args.home)
     state_status = "ready"
@@ -321,7 +344,7 @@ def select_worker(args: argparse.Namespace) -> int:
     """Select a delegation target without launching it or intercepting a prompt."""
     usage = load_usage(args.home)
     probes = {name: probe(name, args.probe_timeout) for name in PROVIDERS}
-    selection, reason = choose_delegation(probes, usage)
+    selection, reason = choose_delegation(probes, usage, args.task)
     print(json.dumps({
         "schema_version": SELECTION_SCHEMA,
         "selection": selection,
@@ -371,6 +394,7 @@ def parser() -> argparse.ArgumentParser:
         q = sub.add_parser(name); q.set_defaults(func=status)
     q = sub.add_parser("select", help="select a delegation target without launching it")
     q.set_defaults(func=select_worker)
+    q.add_argument("--task", default="", help="bounded subtask used only as a deterministic routing key")
     q = sub.add_parser("cancel"); q.add_argument("run_id"); q.set_defaults(func=cancel)
     return p
 

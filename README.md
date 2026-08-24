@@ -9,6 +9,7 @@ claude --plugin-dir "$PWD/plugins/dex-workers"
 ```
 
 - `delegate` skill: 메인 Claude가 하위 작업 위임을 결정하면 자동 호출되어 Claude native subagent, Codex, Antigravity 중 잔량이 가장 많은 사용 가능한 대상을 선택하고 결과를 Claude에 반환합니다.
+- 로컬에 설치·로그인된 Antigravity는 별도 실행 승인 없이 일반 자동 후보로 `agy`를 실행합니다. 인증정보를 추출하거나 복사하지 않습니다.
 - `/dex-workers:run <작업>`: 선택·실행을 수동 진단할 때만 선택적으로 사용합니다.
 - `/dex-workers:review <검토 관점>`: 읽기 전용 코드 리뷰를 요청합니다.
 - `/dex-workers:doctor`, `/dex-workers:status`: 설치·로그인·라우팅 상태를 진단합니다.
@@ -28,6 +29,8 @@ plugins/dex-workers/bin/dex-workers review "보안과 회귀 위험 중심" --cw
 ```
 
 `dex-usage` 캐시는 `${DEX_USAGE_CACHE_DIR}/usage.json`, `${XDG_CACHE_HOME}/dex-usage/usage.json`, 또는 `~/.cache/dex-usage/usage.json` 순서의 해당 위치에서 읽습니다. 기존 v1 요약 캐시와 5시간/주간 창을 보존하는 v2 캐시를 모두 지원하며, 라우팅에는 provider별 보수적인 `remaining_percent` 요약값을 사용합니다. 캐시가 없거나 잘못되어도 정상 동작합니다. credential 파일과 환경 변수는 출력하거나 상태 파일에 기록하지 않습니다.
+
+Antigravity에는 신뢰할 수 있는 headless quota 계약이 없으므로 숫자를 만들어내지 않습니다. `agy`가 준비됐지만 quota가 unknown이면 bounded task 문자열의 해시를 사용해 Antigravity와 잔량이 확인된 최상위 후보를 결정적으로 분산합니다. 같은 task는 같은 후보를 선택하며 Antigravity가 영구적으로 굶지 않습니다.
 
 ## English guide
 
