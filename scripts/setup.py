@@ -9,6 +9,8 @@ import shutil
 import stat
 import sys
 import re
+import json
+import time
 from pathlib import Path
 
 BEGIN = "<!-- dex-workers:default-delegation BEGIN -->"
@@ -25,6 +27,10 @@ PROTOCOL = f"""{BEGIN}
 - Explicit user instructions such as `directly handle`, `no delegation`, `Claude only`, `Codex`, or `Antigravity` override these defaults.
 {END}
 """
+
+STATE_DIR = "dex-workers"
+DISABLED_STATE = "auto-policy.disabled"
+LOCK_DIR = "auto-policy.lock"
 
 HARNESS_FILES = {
     ".harness/README.md": """# Portable project harness
@@ -107,14 +113,18 @@ def backup(path: Path) -> Path:
     shutil.copy2(path, target)
     return target
 
-def update_defaults(home: Path, mode: str) -> int:
+def state_path(home: Path, name: str) -> Path:
+    return safe_root(home / ".claude" / STATE_DIR / name)
+
+def update_defaults(home: Path, mode: str, quiet: bool = False) -> int:
     path = safe_root(home / ".claude" / "CLAUDE.md")
     old = path.read_text() if path.exists() else ""
     if (BEGIN in old) != (END in old) or old.count(BEGIN) > 1 or old.count(END) > 1:
-        print("malformed dex-workers managed markers; refusing update", file=sys.stderr); return 2
+        print("dex-workers: malformed or duplicate managed markers; no changes made", file=sys.stderr); return 2
     if BEGIN in old:
         start, tail = old.split(BEGIN, 1); _, finish = tail.split(END, 1)
-        new = start.rstrip() + "\n\n" + PROTOCOL.rstrip() + finish
+        prefix = start.rstrip() + ("\n\n" if start.strip() else "")
+        new = prefix + PROTOCOL.rstrip() + finish
     elif "## Default Delegation Protocol" in old:
         # Migrate the pre-managed section shipped by dex-workers <=1.3.x. Keep
         # surrounding user instructions, including USER:PERSISTENT markers.
@@ -127,14 +137,109 @@ def update_defaults(home: Path, mode: str) -> int:
     if mode == "check":
         return 0 if old == new else 1
     if mode == "dry-run":
-        print(f"would update {path}"); return 0
+        if not quiet: print(f"would update {path}")
+        return 0
     if old == new:
-        print(f"already current: {path}"); return 0
+        if not quiet: print(f"already current: {path}")
+        return 0
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.exists(): print(f"backup: {backup(path)}")
+    if path.exists():
+        saved = backup(path)
+        if not quiet: print(f"backup: {saved}")
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(new); os.replace(tmp, path)
-    print(f"updated: {path}"); return 0
+    if not quiet: print(f"updated: {path}")
+    return 0
+
+def acquire_policy_lock(home: Path, wait_seconds: float = 0) -> Path | None:
+    lock = state_path(home, LOCK_DIR)
+    lock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            lock.mkdir(mode=0o700)
+            return lock
+        except FileExistsError:
+            try:
+                if (dt.datetime.now().timestamp() - lock.stat().st_mtime) > 60:
+                    lock.rmdir()
+                    continue
+            except (FileNotFoundError, OSError):
+                continue
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.02)
+
+def release_policy_lock(lock: Path | None) -> None:
+    if lock is not None:
+        try: lock.rmdir()
+        except OSError: pass
+
+def write_disabled_state(home: Path) -> Path:
+    path = state_path(home, DISABLED_STATE)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = {"disabled": True, "updated_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    os.replace(tmp, path)
+    return path
+
+def disable_auto_policy(home: Path) -> int:
+    lock = acquire_policy_lock(home, wait_seconds=2)
+    try:
+        path = write_disabled_state(home)
+    finally:
+        release_policy_lock(lock)
+    print(f"auto-policy disabled: {path}")
+    return 0
+
+def enable_auto_policy(home: Path) -> int:
+    path = state_path(home, DISABLED_STATE)
+    if path.exists(): path.unlink()
+    print("auto-policy enabled; it will apply on the next SessionStart")
+    return 0
+
+def restore_defaults(home: Path) -> int:
+    """Remove only a valid managed block and persist the opt-out."""
+    lock = acquire_policy_lock(home, wait_seconds=2)
+    try:
+        path = safe_root(home / ".claude" / "CLAUDE.md")
+        old = path.read_text() if path.exists() else ""
+        if (BEGIN in old) != (END in old) or old.count(BEGIN) > 1 or old.count(END) > 1:
+            print("dex-workers: malformed or duplicate managed markers; no changes made", file=sys.stderr)
+            return 2
+        if BEGIN in old:
+            start, tail = old.split(BEGIN, 1); _, finish = tail.split(END, 1)
+            new = (start.rstrip() + "\n\n" + finish.lstrip()).rstrip() + ("\n" if old.endswith("\n") else "")
+            saved = backup(path)
+            tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+            tmp.write_text(new); os.replace(tmp, path)
+            print(f"restored unmanaged instructions; backup: {saved}")
+        else:
+            print("managed policy not present")
+        disabled = write_disabled_state(home)
+        print(f"auto-policy disabled: {disabled}")
+        return 0
+    finally:
+        release_policy_lock(lock)
+
+def session_start(home: Path) -> int:
+    """Fail-open, non-waiting first-session installer used by the async plugin hook."""
+    try:
+        disabled = state_path(home, DISABLED_STATE)
+        if disabled.exists(): return 0
+        lock = acquire_policy_lock(home)
+        if lock is None: return 0
+        try:
+            if disabled.exists(): return 0
+            result = update_defaults(home, "apply", quiet=True)
+            if result:
+                print("dex-workers: auto-policy skipped; run /dex-workers:setup for details", file=sys.stderr)
+        finally:
+            release_policy_lock(lock)
+    except Exception as exc:
+        print(f"dex-workers: auto-policy skipped ({type(exc).__name__})", file=sys.stderr)
+    return 0
 
 def setup_project(target: Path, mode: str) -> int:
     target = safe_root(target)
@@ -169,12 +274,17 @@ def setup_project(target: Path, mode: str) -> int:
     print(f"project harness ready: {target / '.harness'}"); return 0
 
 def main() -> int:
-    p=argparse.ArgumentParser(); p.add_argument("command", choices=("setup-user","setup-project"))
+    p=argparse.ArgumentParser(); p.add_argument("command", choices=("setup-user","setup-project","session-start","disable-auto-policy","enable-auto-policy","restore-user"))
     p.add_argument("--home", type=Path, default=Path.home()); p.add_argument("--target", type=Path, default=Path.cwd())
     group=p.add_mutually_exclusive_group(); group.add_argument("--dry-run", action="store_true"); group.add_argument("--check", action="store_true")
     a=p.parse_args(); mode="check" if a.check else "dry-run" if a.dry_run else "apply"
     try:
-        return update_defaults(a.home, mode) if a.command == "setup-user" else setup_project(a.target, mode)
+        if a.command == "setup-user": return update_defaults(a.home, mode)
+        if a.command == "setup-project": return setup_project(a.target, mode)
+        if a.command == "session-start": return session_start(a.home)
+        if a.command == "disable-auto-policy": return disable_auto_policy(a.home)
+        if a.command == "enable-auto-policy": return enable_auto_policy(a.home)
+        return restore_defaults(a.home)
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 2

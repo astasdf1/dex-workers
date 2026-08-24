@@ -11,6 +11,7 @@ RELEASE_FILES = (
     "NOTICE.md",
     "README.md",
     "bin/dex-workers",
+    "hooks/hooks.json",
     "scripts/dex_workers.py",
     "scripts/setup.py",
     "skills/cancel/SKILL.md",

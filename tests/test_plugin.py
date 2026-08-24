@@ -87,6 +87,8 @@ class DexWorkersTest(unittest.TestCase):
         self.assertIn("CLAUDE_NATIVE", delegate)
         self.assertIn("Task", delegate)
         self.assertIn("--role <role>", delegate)
+        module = load_module(); self.assertEqual(module.VERSION, manifest["version"])
+        self.assertIn(f'dex-workers-{manifest["version"]}.tar.gz', (ROOT / "scripts/package.py").read_text())
 
     def test_setup_defaults_upgrade_backup_idempotent_and_malformed(self):
         setup = ROOT / "scripts/setup.py"
@@ -103,6 +105,74 @@ class DexWorkersTest(unittest.TestCase):
             self.assertEqual(run("--check").returncode,0); self.assertEqual(run().returncode,0); self.assertEqual(config.read_text(),current)
             config.write_text("<!-- dex-workers:default-delegation BEGIN -->\nbroken")
             self.assertEqual(run().returncode,2); self.assertEqual(config.read_text(),"<!-- dex-workers:default-delegation BEGIN -->\nbroken")
+
+    def test_session_start_fresh_existing_idempotent_and_hook_contract(self):
+        setup = ROOT / "scripts/setup.py"
+        hook = json.loads((ROOT / "hooks/hooks.json").read_text())
+        handler = hook["hooks"]["SessionStart"][0]["hooks"][0]
+        self.assertTrue(handler["async"]); self.assertEqual(handler["command"], "python3")
+        self.assertIn("${CLAUDE_PLUGIN_ROOT}/scripts/setup.py", handler["args"])
+        for initial in (None, "keep this unrelated content\n"):
+            with self.subTest(initial=initial), tempfile.TemporaryDirectory() as raw:
+                home = Path(raw).resolve(); config = home / ".claude/CLAUDE.md"
+                if initial is not None:
+                    config.parent.mkdir(); config.write_text(initial)
+                run = lambda: subprocess.run([sys.executable, str(setup), "session-start", "--home", str(home)], text=True, capture_output=True)
+                self.assertEqual(run().returncode, 0)
+                current = config.read_text(); self.assertIn("at most 5 delegated subtasks", current)
+                if initial is not None: self.assertIn(initial.strip(), current)
+                backups = list((home / ".claude/backups").glob("CLAUDE.md.before-dex-workers.*"))
+                self.assertEqual(len(backups), 1 if initial is not None else 0)
+                self.assertEqual(run().returncode, 0); self.assertEqual(config.read_text(), current)
+                self.assertEqual(len(list((home / ".claude/backups").glob("*"))), len(backups))
+
+    def test_session_start_opt_out_restore_and_explicit_reenable(self):
+        setup = ROOT / "scripts/setup.py"
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw).resolve(); config = home / ".claude/CLAUDE.md"
+            call = lambda command: subprocess.run([sys.executable, str(setup), command, "--home", str(home)], text=True, capture_output=True)
+            self.assertEqual(call("disable-auto-policy").returncode, 0)
+            self.assertEqual(call("session-start").returncode, 0); self.assertFalse(config.exists())
+            self.assertTrue((home / ".claude/dex-workers/auto-policy.disabled").is_file())
+            self.assertEqual(call("enable-auto-policy").returncode, 0)
+            self.assertEqual(call("session-start").returncode, 0); self.assertTrue(config.exists())
+            config.write_text("mine\n\n" + config.read_text())
+            self.assertEqual(call("restore-user").returncode, 0)
+            self.assertEqual(config.read_text(), "mine\n"); self.assertTrue((home / ".claude/dex-workers/auto-policy.disabled").exists())
+            self.assertEqual(call("session-start").returncode, 0); self.assertEqual(config.read_text(), "mine\n")
+
+    def test_session_start_malformed_duplicate_locking_concurrency_and_failure(self):
+        setup = ROOT / "scripts/setup.py"
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw).resolve(); claude = home / ".claude"; claude.mkdir(); config = claude / "CLAUDE.md"
+            malformed = "<!-- dex-workers:default-delegation BEGIN -->\nbroken\n"
+            config.write_text(malformed)
+            result = subprocess.run([sys.executable, str(setup), "session-start", "--home", str(home)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0); self.assertEqual(config.read_text(), malformed); self.assertIn("skipped", result.stderr)
+            duplicate = ("<!-- dex-workers:default-delegation BEGIN -->\n<!-- dex-workers:default-delegation BEGIN -->\n"
+                         "<!-- dex-workers:default-delegation END -->\n")
+            config.write_text(duplicate)
+            result = subprocess.run([sys.executable, str(setup), "session-start", "--home", str(home)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0); self.assertEqual(config.read_text(), duplicate)
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw).resolve(); config = home / ".claude/CLAUDE.md"; config.parent.mkdir(); config.write_text("mine\n")
+            processes = [subprocess.Popen([sys.executable, str(setup), "session-start", "--home", str(home)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(8)]
+            for process in processes: self.assertEqual(process.communicate(timeout=5)[0], "")
+            self.assertEqual(config.read_text().count("dex-workers:default-delegation BEGIN"), 1)
+            self.assertEqual(len(list((home / ".claude/backups").glob("*"))), 1)
+            lock = home / ".claude/dex-workers/auto-policy.lock"; lock.mkdir()
+            before = config.read_text(); subprocess.run([sys.executable, str(setup), "session-start", "--home", str(home)], check=True)
+            self.assertEqual(config.read_text(), before)
+            disable = subprocess.Popen([sys.executable, str(setup), "disable-auto-policy", "--home", str(home)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            time.sleep(0.05); self.assertIsNone(disable.poll())
+            lock.rmdir(); self.assertEqual(disable.communicate(timeout=5)[1], "")
+            self.assertTrue((home / ".claude/dex-workers/auto-policy.disabled").exists())
+            subprocess.run([sys.executable, str(setup), "session-start", "--home", str(home)], check=True)
+            self.assertEqual(config.read_text(), before)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve(); outside = root / "outside"; outside.mkdir(); home = root / "home"; home.symlink_to(outside, target_is_directory=True)
+            result = subprocess.run([sys.executable, str(setup), "session-start", "--home", str(home)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0); self.assertIn("skipped", result.stderr); self.assertEqual(list(outside.iterdir()), [])
 
     def test_project_harness_fresh_check_idempotent_conflict_and_symlink(self):
         setup=ROOT/"scripts/setup.py"

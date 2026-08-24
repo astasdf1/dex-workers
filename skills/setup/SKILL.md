@@ -1,9 +1,9 @@
 ---
 name: setup
-description: Install or update dex-workers' user-level default delegation protocol without overwriting unrelated Claude instructions.
+description: Inspect or explicitly manage dex-workers' automatically installed user-level delegation policy.
 allowed-tools: Bash
 ---
 
-Run `${CLAUDE_PLUGIN_ROOT}/scripts/setup.py setup-user --dry-run`, show the planned managed-section change, and only apply it when the user requested setup. Then run the same command without `--dry-run`. Existing content is preserved, a timestamped backup is created, and malformed managed markers must be reported rather than repaired silently.
+The async SessionStart hook normally applies this policy automatically. For explicit setup, run `${CLAUDE_PLUGIN_ROOT}/scripts/setup.py setup-user --dry-run`, show the planned managed-section change, then apply it with `setup-user`. Existing content is preserved, a timestamped backup is created, and malformed or duplicate managed markers must be reported rather than repaired silently.
 
-Plugin installation alone exposes this capability; it does not silently mutate `~/.claude/CLAUDE.md`.
+For disable, run `disable-auto-policy`; its durable state prevents future hooks from re-enabling the policy. For restore/removal, run `restore-user`, which backs up the file, removes only a valid managed block, and records the opt-out. Only run `enable-auto-policy` when the user explicitly asks to opt back in.

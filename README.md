@@ -34,7 +34,7 @@ Antigravity에는 신뢰할 수 있는 headless quota 계약이 없으므로 숫
 
 ## English guide
 
-Load with `claude --plugin-dir "$PWD/plugins/dex-workers"`. Claude remains the main agent. When it decides to delegate a bounded subtask, the auto-invocable `delegate` skill calls the selector and routes that subtask to a native Claude subagent, Codex, or Antigravity. It does not intercept prompts and users do not need to type a run command. `/dex-workers:run` and `/dex-workers:review` remain optional diagnostics, alongside `/dex-workers:doctor`, `/dex-workers:status`, and `/dex-workers:cancel`.
+Load with `claude --plugin-dir "$PWD/plugins/dex-workers"`. On the first SessionStart after enablement, an official async plugin hook safely installs the managed delegation-first block in `~/.claude/CLAUDE.md`; because it is asynchronous, the newly written policy is guaranteed for later sessions, not necessarily the session already loading. It preserves unrelated content, creates a timestamped backup, is idempotent, fails open, and refuses malformed or duplicate managed markers. Claude remains the main agent and routes bounded subtasks through the auto-invocable `delegate` skill.
 
 Runs are read-only by default. A workspace-writing run requires an explicit, user-authorized `run ... --write`; `review` is always read-only. Automatic routing excludes missing, unauthenticated, or unsupported CLIs; a valid `dex-usage` cache is advisory. Any unavailable route, launch failure, timeout, or worker failure returns a clear `CLAUDE_FALLBACK` result so Claude can continue locally. Cancellation targets only a run ID created by this wrapper. Provider output is captured as structured JSON; credentials and environment contents are never logged.
 
@@ -45,7 +45,7 @@ claude plugin marketplace add /absolute/path/to/plugins/dex-workers
 claude plugin install dex-workers@dex-team --scope user
 ```
 
-플러그인 설치는 기능만 활성화하며 사용자 지침이나 프로젝트 파일을 몰래 변경하지 않습니다. 전역 기본 위임 정책(동시 최대 5개)은 Claude Code에서 `/dex-workers:setup`을 실행하거나 아래처럼 명시적으로 설치합니다. 기존 `~/.claude/CLAUDE.md`의 다른 내용은 보존되고 변경 전 백업이 생성됩니다.
+플러그인을 활성화한 뒤 첫 Claude Code `SessionStart`에서 공식 비동기 plugin lifecycle hook이 전역 기본 위임 정책(동시 최대 5개)을 자동 적용합니다. 시작을 막지 않으며, 기존 `~/.claude/CLAUDE.md`의 다른 내용은 보존되고 변경 전 `~/.claude/backups/CLAUDE.md.before-dex-workers.<timestamp>` 백업이 생성됩니다. 비동기이므로 방금 시작한 세션이 아니라 이후 세션부터 정책 로드가 보장됩니다. 이후 실행은 멱등이며 관리 마커가 누락·중복·손상된 경우 파일을 덮어쓰지 않고 짧은 진단만 남긴 뒤 Claude 시작을 계속합니다.
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-user --dry-run
@@ -53,7 +53,20 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-user
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-user --check
 ```
 
-제거하려면 가장 최근 `~/.claude/backups/CLAUDE.md.before-dex-workers.*`를 검토해 복원하거나, `dex-workers:default-delegation BEGIN/END` 관리 구간만 제거합니다. 플러그인 제거가 사용자 지침을 자동 삭제하지는 않습니다.
+자동 정책을 끄려면 아래 durable opt-out을 사용합니다. `~/.claude/dex-workers/auto-policy.disabled`가 업데이트와 재설치 후에도 유지되므로 이후 SessionStart가 정책을 다시 켜지 않습니다. 다시 사용하려는 경우에만 명시적으로 enable 하십시오.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" disable-auto-policy
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" enable-auto-policy
+```
+
+정책을 제거하고 자동 재적용도 끄려면 `restore-user`를 사용합니다. 유효한 관리 구간만 제거하고 먼저 백업합니다. 손상되거나 중복된 마커는 절대 자동 복구/삭제하지 않습니다.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" restore-user
+```
+
+제거 권장 순서는 `restore-user`, `claude plugin uninstall dex-workers@dex-team --scope user`입니다. uninstall은 `~/.claude/CLAUDE.md`, 백업, opt-out 상태를 자동 삭제하지 않습니다. 과거 전체 파일로 되돌릴 때만 최신 백업을 검토한 뒤 수동 복원하십시오. 프로젝트 하네스 설정은 계속 별도이며 설치/SessionStart로 생성되지 않습니다.
 
 ### Portable minimal harness
 

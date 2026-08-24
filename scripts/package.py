@@ -16,7 +16,7 @@ EXECUTABLES = {Path("bin/dex-workers"), Path("scripts/dex_workers.py")}
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", type=Path, default=Path("dist/dex-workers-1.4.3.tar.gz"))
+    parser.add_argument("--out", type=Path, default=Path("dist/dex-workers-1.6.0.tar.gz"))
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     out = args.out.expanduser().absolute()
