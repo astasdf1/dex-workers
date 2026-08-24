@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 CACHE_SCHEMAS = frozenset({"dex.provider_usage_cache.v1", "dex.provider_usage_cache.v2", "dex.provider_usage_cache.v3"})
 RESULT_SCHEMA = "dex.external_worker_result.v1"
 SELECTION_SCHEMA = "dex.worker_selection.v1"
@@ -164,6 +164,20 @@ def remaining(provider: str, usage: dict[str, Any] | None) -> float | None:
     key = {"codex": "openai", "agy": "antigravity", "claude": "claude"}[provider]
     row = usage.get(key) if usage else None
     value = row.get("remaining_percent") if isinstance(row, dict) else None
+    if provider == "agy" and isinstance(row, dict):
+        windows = row.get("windows")
+        values = []
+        if isinstance(windows, dict):
+            for name in ("five_hour", "one_week"):
+                item = windows.get(name)
+                percent = item.get("remaining_percent") if isinstance(item, dict) else None
+                if isinstance(percent, bool) or not isinstance(percent, (int, float)) or not math.isfinite(percent) or not 0 <= percent <= 100:
+                    values=[]
+                    break
+                values.append(float(percent))
+        # v3 collectors provide both named windows. Keep accepting their
+        # conservative top-level summary during an in-place dex-usage upgrade.
+        if values:value=min(values)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     number = float(value)

@@ -63,6 +63,8 @@ class DexWorkersTest(unittest.TestCase):
             cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v3","retired_google_provider":{"remaining_percent":99},"antigravity":{"readiness":"ready"}}))
             module=load_module(); data=module.load_usage(home)
             self.assertIsNone(module.remaining("agy",data))
+            data["antigravity"].update({"remaining_percent":42,"stale":True,"windows":{"five_hour":{"remaining_percent":42},"one_week":{"remaining_percent":70}}})
+            self.assertEqual(module.remaining("agy",data),42)
     def call(self, home: Path, *args: str, path: str = "/usr/bin:/bin"):
         env = os.environ | {"HOME": str(home), "PATH": path, "DEX_WORKERS_STATE_DIR": str(home / "state")}
         return subprocess.run([sys.executable, str(CLI), "--home", str(home), "--probe-timeout", "0.5", *args],

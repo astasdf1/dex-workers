@@ -30,7 +30,7 @@ plugins/dex-workers/bin/dex-workers review "보안과 회귀 위험 중심" --cw
 
 `dex-usage` 캐시는 `${DEX_USAGE_CACHE_DIR}/usage.json`, `${XDG_CACHE_HOME}/dex-usage/usage.json`, 또는 `~/.cache/dex-usage/usage.json` 순서의 해당 위치에서 읽습니다. 기존 v1 요약 캐시와 5시간/주간 창을 보존하는 v2 캐시를 모두 지원하며, 라우팅에는 provider별 보수적인 `remaining_percent` 요약값을 사용합니다. 캐시가 없거나 잘못되어도 정상 동작합니다. credential 파일과 환경 변수는 출력하거나 상태 파일에 기록하지 않습니다.
 
-Antigravity에는 신뢰할 수 있는 headless quota 계약이 없으므로 숫자를 만들어내지 않습니다. `agy`가 준비됐지만 quota가 unknown이면 일반 리뷰 후보 및 다관점 리뷰에 포함합니다. 5% 경계는 정확히 `< 5%`이며 5%는 포함됩니다. 다관점 결과는 메인 Claude가 중복과 충돌을 종합하고, 중요 판정은 Claude/Codex 확인을 기준으로 합니다. Antigravity 단독 지적은 보조·미확인으로 표시합니다.
+Antigravity에는 신뢰할 수 있는 headless quota 계약이 없으므로 숫자를 만들어내지 않습니다. 별도 `dex-usage` setup으로 opt-in한 TUI 수집기가 v3 캐시에 검증된 5시간/7일 값과 보수적 요약값을 기록한 경우에만 그 요약을 라우팅 참고값으로 사용합니다. `agy`가 준비됐지만 quota가 unknown이면 일반 리뷰 후보 및 다관점 리뷰에 포함합니다. 5% 경계는 정확히 `< 5%`이며 5%는 포함됩니다. 다관점 결과는 메인 Claude가 중복과 충돌을 종합하고, 중요 판정은 Claude/Codex 확인을 기준으로 합니다. Antigravity 단독 지적은 보조·미확인으로 표시합니다.
 
 ## English guide
 

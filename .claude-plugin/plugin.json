@@ -1,6 +1,6 @@
 {
   "name": "dex-workers",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Run Codex CLI and Antigravity agy as safe external Claude Code workers",
   "author": {"name": "DEX-2"},
   "license": "Proprietary",
