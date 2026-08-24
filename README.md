@@ -27,7 +27,7 @@ plugins/dex-workers/bin/dex-workers run "명시적으로 승인된 변경을 적
 plugins/dex-workers/bin/dex-workers review "보안과 회귀 위험 중심" --cwd "$PWD"
 ```
 
-`dex-usage` 캐시는 `${DEX_USAGE_CACHE_DIR}/usage.json`, `${XDG_CACHE_HOME}/dex-usage/usage.json`, 또는 `~/.cache/dex-usage/usage.json` 순서의 해당 위치에서 읽습니다. 캐시가 없거나 잘못되어도 정상 동작합니다. credential 파일과 환경 변수는 출력하거나 상태 파일에 기록하지 않습니다.
+`dex-usage` 캐시는 `${DEX_USAGE_CACHE_DIR}/usage.json`, `${XDG_CACHE_HOME}/dex-usage/usage.json`, 또는 `~/.cache/dex-usage/usage.json` 순서의 해당 위치에서 읽습니다. 기존 v1 요약 캐시와 5시간/주간 창을 보존하는 v2 캐시를 모두 지원하며, 라우팅에는 provider별 보수적인 `remaining_percent` 요약값을 사용합니다. 캐시가 없거나 잘못되어도 정상 동작합니다. credential 파일과 환경 변수는 출력하거나 상태 파일에 기록하지 않습니다.
 
 ## English guide
 
