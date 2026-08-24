@@ -84,17 +84,19 @@ exec sh -c "$VERIFY_COMMAND"
 
 def safe_root(path: Path) -> Path:
     path = path.expanduser().absolute()
-    # macOS exposes /var as a system symlink to /private/var. Canonicalize the
-    # platform prefix, but never accept the requested target itself as a link.
-    if path.is_symlink():
-        raise ValueError(f"refusing symlink target: {path}")
-    path = path.resolve(strict=False)
     if path == Path(path.anchor):
         raise ValueError("refusing filesystem root")
+    # Inspect the spelling supplied by the caller before resolving it. Resolving
+    # first would erase an intermediate link such as base/link/project and let
+    # writes escape into link's target. Non-existing suffixes are valid.
     current = Path(path.anchor)
     for part in path.parts[1:]:
         current /= part
-        if current.exists() and stat.S_ISLNK(os.lstat(current).st_mode):
+        try:
+            mode = os.lstat(current).st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(mode):
             raise ValueError(f"refusing symlink path component: {current}")
     return path
 

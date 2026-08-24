@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 CACHE_SCHEMAS = frozenset({"dex.provider_usage_cache.v1", "dex.provider_usage_cache.v2", "dex.provider_usage_cache.v3"})
 RESULT_SCHEMA = "dex.external_worker_result.v1"
 SELECTION_SCHEMA = "dex.worker_selection.v1"
