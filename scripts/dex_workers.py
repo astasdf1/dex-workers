@@ -16,8 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.0.0"
-CACHE_SCHEMA = "dex.provider_usage_cache.v1"
+VERSION = "1.0.1"
+CACHE_SCHEMAS = frozenset({"dex.provider_usage_cache.v1", "dex.provider_usage_cache.v2"})
 RESULT_SCHEMA = "dex.external_worker_result.v1"
 SELECTION_SCHEMA = "dex.worker_selection.v1"
 PROVIDERS = ("codex", "agy")
@@ -46,7 +46,7 @@ def load_usage(home: Path) -> dict[str, Any] | None:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 1_048_576:
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) and data.get("schema_version") == CACHE_SCHEMA else None
+        return data if isinstance(data, dict) and data.get("schema_version") in CACHE_SCHEMAS else None
     except (OSError, ValueError, TypeError):
         return None
 

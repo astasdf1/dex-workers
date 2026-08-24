@@ -1,12 +1,22 @@
 from __future__ import annotations
-import json, os, stat, subprocess, sys, tarfile, tempfile, textwrap, time, unittest
+import importlib.util, json, os, stat, subprocess, sys, tarfile, tempfile, textwrap, time, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts/dex_workers.py"
 
+def load_module():
+    spec=importlib.util.spec_from_file_location("dex_workers_under_test",CLI)
+    module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); return module
+
 
 class DexWorkersTest(unittest.TestCase):
+    def test_usage_cache_v2_is_accepted(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home=Path(raw); cache=home/".cache/dex-usage/usage.json"; cache.parent.mkdir(parents=True)
+            cache.write_text(json.dumps({"schema_version":"dex.provider_usage_cache.v2","openai":{"remaining_percent":70,"windows":{"five_hour":{"remaining_percent":70},"one_week":{"remaining_percent":80}}},"gemini":{"remaining_percent":20}}))
+            module=load_module(); data=module.load_usage(home)
+            self.assertEqual(data["schema_version"],"dex.provider_usage_cache.v2"); self.assertEqual(module.remaining("codex",data),70)
     def call(self, home: Path, *args: str, path: str = "/usr/bin:/bin"):
         env = os.environ | {"HOME": str(home), "PATH": path, "DEX_WORKERS_STATE_DIR": str(home / "state")}
         return subprocess.run([sys.executable, str(CLI), "--home", str(home), "--probe-timeout", "0.5", *args],
