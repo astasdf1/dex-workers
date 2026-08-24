@@ -32,6 +32,9 @@ class DexWorkersTest(unittest.TestCase):
         usage["claude"]["remaining_percent"] = 4.9
         usage["openai"]["remaining_percent"] = 4.9
         self.assertEqual(module.choose_for_role("review", "multi", "auto", probes, usage)[0], ["agy"])
+        usage["antigravity"]["remaining_percent"] = 4.9
+        self.assertEqual(module.choose_for_role("review", "multi", "auto", probes, usage),
+                         ([], "multi_perspective_no_eligible_provider"))
 
     def test_audit_and_implementation_do_not_auto_select_agy(self):
         module = load_module(); probes = {"codex":{"enabled":True}, "agy":{"enabled":True}}

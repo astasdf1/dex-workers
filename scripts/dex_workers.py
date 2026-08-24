@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 CACHE_SCHEMAS = frozenset({"dex.provider_usage_cache.v1", "dex.provider_usage_cache.v2", "dex.provider_usage_cache.v3"})
 RESULT_SCHEMA = "dex.external_worker_result.v1"
 SELECTION_SCHEMA = "dex.worker_selection.v1"
@@ -245,7 +245,8 @@ def choose_for_role(role: str, mode: str, requested: str,
         return ([name], "explicit") if ready.get(name, False) else ([CLAUDE_NATIVE], f"{requested}_unavailable")
     if mode == "multi":
         selected = [name for name in (CLAUDE_NATIVE, "codex", "agy") if ready[name]]
-        return (selected or [CLAUDE_NATIVE], "multi_perspective_all_eligible")
+        reason = "multi_perspective_all_eligible" if selected else "multi_perspective_no_eligible_provider"
+        return selected, reason
     if role == "review":
         if ready["agy"]:
             return ["agy"], "review_prefers_antigravity"
@@ -385,7 +386,7 @@ def select_worker(args: argparse.Namespace) -> int:
     selections, reason = choose_for_role(args.role, args.mode, args.provider, probes, usage, args.task)
     print(json.dumps({
         "schema_version": SELECTION_SCHEMA,
-        "selection": selections[0],
+        "selection": selections[0] if selections else None,
         "selections": selections,
         "role": args.role,
         "mode": args.mode,
