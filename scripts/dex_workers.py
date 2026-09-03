@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 CACHE_SCHEMAS = frozenset({"dex.provider_usage_cache.v1", "dex.provider_usage_cache.v2", "dex.provider_usage_cache.v3"})
 RESULT_SCHEMA = "dex.external_worker_result.v1"
 SELECTION_SCHEMA = "dex.worker_selection.v1"
@@ -26,6 +26,10 @@ FALLBACK = "CLAUDE_FALLBACK"
 CLAUDE_NATIVE = "CLAUDE_NATIVE"
 MAX_OUTPUT = 1_048_576
 MAX_STATE = 16_384
+WINDOWS = os.name == "nt"
+REVIEW_SCOPE = ("Review the staged, unstaged, and untracked changes in this working tree "
+                "and report findings only. ")
+STILL_ACTIVE = 259
 
 
 def cache_root(home: Path) -> Path:
@@ -57,6 +61,44 @@ def worker_env() -> dict[str, str]:
     return dict(os.environ)
 
 
+def windows_process_identity(pid: int) -> str | None:
+    """Creation time of a live process, read straight from the Windows kernel.
+
+    Win32 has no process groups to check, so the creation timestamp carries the
+    whole anti-PID-reuse guarantee that `lstart` provides on POSIX.  Only the
+    timestamp is read; no command line or environment data is touched.
+    """
+    import ctypes
+    from ctypes import wintypes
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except OSError:
+        return None
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME),
+                                         ctypes.POINTER(wintypes.FILETIME),
+                                         ctypes.POINTER(wintypes.FILETIME),
+                                         ctypes.POINTER(wintypes.FILETIME))
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != STILL_ACTIVE:
+            return None
+        creation, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not kernel32.GetProcessTimes(handle, ctypes.byref(creation), ctypes.byref(exited),
+                                        ctypes.byref(kernel), ctypes.byref(user)):
+            return None
+        return f"{creation.dwHighDateTime:08x}{creation.dwLowDateTime:08x}"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def process_identity(pid: int) -> str | None:
     """Return a stable process-start token, or fail closed when unavailable.
 
@@ -65,6 +107,11 @@ def process_identity(pid: int) -> str | None:
     recorded only for the short-lived child process; no command line or
     environment data is read.
     """
+    if WINDOWS:
+        try:
+            return windows_process_identity(pid)
+        except (OSError, ValueError, AttributeError):
+            return None
     try:
         ps = "/bin/ps" if Path("/bin/ps").is_file() else shutil.which("ps")
         if not ps:
@@ -78,16 +125,44 @@ def process_identity(pid: int) -> str | None:
         return None
 
 
+def owns_process(pid: int, identity: object) -> bool:
+    """Confirm the recorded pid is still the process this wrapper launched."""
+    if not isinstance(identity, str) or not identity or identity != process_identity(pid):
+        return False
+    if WINDOWS:
+        # The creation timestamp already rules out PID reuse; Win32 has no
+        # process group to corroborate it with.
+        return True
+    try:
+        return os.getpgid(pid) == pid
+    except OSError:
+        return False
+
+
+def signal_process_group(pid: int, force: bool = False) -> None:
+    """Terminate a managed worker and its children on either platform."""
+    if WINDOWS:
+        # A detached console child cannot be asked to exit gracefully from here,
+        # so the tree is always torn down forcefully.
+        taskkill = shutil.which("taskkill")
+        if not taskkill:
+            raise OSError("taskkill unavailable")
+        subprocess.run([taskkill, "/T", "/F", "/PID", str(pid)], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+        return
+    os.killpg(pid, signal.SIGKILL if force else signal.SIGTERM)
+
+
 def stop_process_group(process: subprocess.Popen[str]) -> None:
     """Best-effort cleanup used only for a process launched by this wrapper."""
     if process.poll() is not None:
         return
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        signal_process_group(process.pid)
         process.communicate(timeout=3)
     except (OSError, subprocess.TimeoutExpired):
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            signal_process_group(process.pid, force=True)
             process.communicate(timeout=3)
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -122,9 +197,11 @@ def probe(provider: str, timeout: float = 5.0) -> dict[str, Any]:
     row["executable"] = executable
     command = [executable, "login", "status"] if provider == "codex" else [executable, "--help"]
     try:
+        # `text=True` alone decodes with the locale codec, which fails outright on
+        # any non-ASCII byte under a non-UTF-8 console codepage such as cp949.
         result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, timeout=timeout,
-                                env=worker_env(), check=False)
+                                stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
+                                timeout=timeout, env=worker_env(), check=False)
     except (OSError, subprocess.TimeoutExpired):
         row["reason"] = "probe_failed"
         return row
@@ -142,7 +219,8 @@ def probe(provider: str, timeout: float = 5.0) -> dict[str, Any]:
             return row
         try:
             auth = subprocess.run([executable, "models"], stdin=subprocess.DEVNULL,
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  encoding="utf-8", errors="replace",
                                   timeout=timeout, env=worker_env(), check=False)
             text = (auth.stdout + "\n" + auth.stderr).lower()
             result = auth
@@ -288,15 +366,34 @@ def emit(value: dict[str, Any]) -> int:
     return 0 if value["status"] in {"completed", FALLBACK, "cancelled"} else 2
 
 
-def command_for(provider: str, action: str, cwd: Path, prompt: str, write_enabled: bool) -> list[str]:
+def command_for(provider: str, action: str, cwd: Path, prompt: str, write_enabled: bool,
+                executable: str | None = None) -> tuple[list[str], str | None]:
+    """Return argv plus the text to feed the worker on stdin, if any.
+
+    argv[0] is the absolute launcher path because Windows `CreateProcess` does
+    not apply PATHEXT, so a bare name never resolves the `.cmd` shim that npm
+    installs.  Because that shim is re-parsed by cmd.exe, the prompt is handed
+    to Codex on stdin there instead: it keeps shell metacharacters out of the
+    re-parse and sidesteps the 8191-character command-line limit.
+    """
     if provider == "codex":
+        launcher = executable or "codex"
+        def carry(text: str) -> tuple[str, str | None]:
+            """Windows reads the prompt from stdin via `-`; POSIX takes it on argv."""
+            return ("-", text) if WINDOWS else (text, None)
         if action == "review":
             # `codex review` has no workspace-write mode and is deliberately
             # invoked from the requested directory rather than with `-C`.
-            return ["codex", "review", "--uncommitted", prompt]
+            # codex >= 0.153.1 rejects `--uncommitted` alongside a PROMPT, and the
+            # prompt is what carries the caller's bounded subtask, so the scope is
+            # stated in the instructions instead.  A prompt-only review still reads
+            # staged, unstaged, and untracked changes.
+            argument, stdin_prompt = carry(REVIEW_SCOPE + prompt)
+            return [launcher, "review", argument], stdin_prompt
+        argument, stdin_prompt = carry(prompt)
         sandbox = "workspace-write" if write_enabled else "read-only"
-        return ["codex", "exec", "--ephemeral", "--color", "never", "-C", str(cwd),
-                "--sandbox", sandbox, prompt]
+        return ([launcher, "exec", "--ephemeral", "--color", "never", "-C", str(cwd),
+                 "--sandbox", sandbox, argument], stdin_prompt)
     # agy's sandbox is a boolean, so plan mode is the additional hard guard
     # for the default read-only route.  Workspace edits require a separate,
     # user-directed opt-in to accept-edits mode.
@@ -306,7 +403,10 @@ def command_for(provider: str, action: str, cwd: Path, prompt: str, write_enable
         guard = "You may modify only files needed for this explicitly authorized task. "
     if action == "review":
         guard += "Review the current uncommitted changes and report findings only. "
-    return ["agy", "--mode", mode, "--print-timeout", "24h", "--sandbox", "--print", guard + prompt]
+    # agy takes its prompt on argv; it exposes no documented stdin form to move
+    # the text out of the Windows cmd.exe re-parse the way Codex's `-` does.
+    return [executable or "agy", "--mode", mode, "--print-timeout", "24h",
+            "--sandbox", "--print", guard + prompt], None
 
 
 def run_worker(args: argparse.Namespace) -> int:
@@ -320,7 +420,8 @@ def run_worker(args: argparse.Namespace) -> int:
         return emit(result(FALLBACK, action=args.action, reason=route_reason, next_action="continue_in_claude",
                            message="No eligible external worker; Claude should continue locally."))
     write_enabled = bool(getattr(args, "write", False))
-    argv = command_for(provider, args.action, cwd, args.prompt, write_enabled)
+    argv, stdin_prompt = command_for(provider, args.action, cwd, args.prompt, write_enabled,
+                                     probes[provider].get("executable"))
     state = state_root(args.home)
     if state.is_symlink() or (state.exists() and not state.is_dir()):
         return emit(result("error", error="unsafe_state_directory"))
@@ -332,9 +433,15 @@ def run_worker(args: argparse.Namespace) -> int:
     started = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     process: subprocess.Popen[str] | None = None
     try:
-        process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True, start_new_session=True,
-                                   env=worker_env())
+        # Win32 has no sessions; a new process group is the closest isolation
+        # primitive and is what `taskkill /T` tears down later.
+        detach = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS
+                  else {"start_new_session": True})
+        process = subprocess.Popen(argv, cwd=cwd,
+                                   stdin=subprocess.PIPE if stdin_prompt is not None else subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   encoding="utf-8", errors="replace",
+                                   env=worker_env(), **detach)
         identity = process_identity(process.pid)
         if identity is None:
             raise OSError("unable to identify managed worker process")
@@ -343,12 +450,12 @@ def run_worker(args: argparse.Namespace) -> int:
             json.dump({"run_id": run_id, "pid": process.pid, "provider": provider,
                        "action": args.action, "started_at": started, "process_identity": identity}, stream)
         try:
-            stdout, stderr = process.communicate(timeout=args.timeout)
+            stdout, stderr = process.communicate(stdin_prompt, timeout=args.timeout)
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGTERM)
+            signal_process_group(process.pid)
             try: stdout, stderr = process.communicate(timeout=3)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL); stdout, stderr = process.communicate()
+                signal_process_group(process.pid, force=True); stdout, stderr = process.communicate()
             return emit(result(FALLBACK, provider=provider, run_id=run_id, reason="timeout", next_action="continue_in_claude",
                                message="External worker timed out; Claude should continue locally."))
     except OSError as exc:
@@ -384,7 +491,7 @@ def status(args: argparse.Namespace) -> int:
         try:
             if path.is_symlink() or path.stat().st_size > MAX_STATE: continue
             row = json.loads(path.read_text(encoding="utf-8")); pid = int(row["pid"])
-            if row.get("process_identity") == process_identity(pid) and os.getpgid(pid) == pid:
+            if owns_process(pid, row.get("process_identity")):
                 active.append(row)
         except (OSError, ValueError): pass
     return emit(result("completed", version=VERSION, providers=probes,
@@ -419,13 +526,12 @@ def cancel(args: argparse.Namespace) -> int:
     try:
         if path.is_symlink() or path.stat().st_size > MAX_STATE: raise ValueError("unsafe state record")
         data = json.loads(path.read_text(encoding="utf-8")); pid = int(data["pid"])
-        owned = (data.get("run_id") == args.run_id and isinstance(data.get("process_identity"), str)
-                 and data["process_identity"] == process_identity(pid) and os.getpgid(pid) == pid)
+        owned = data.get("run_id") == args.run_id and owns_process(pid, data.get("process_identity"))
         if not owned:
             path.unlink(missing_ok=True)
             return emit(result(FALLBACK, reason="stale_or_unowned_run", run_id=args.run_id,
                                next_action="continue_in_claude"))
-        os.killpg(pid, signal.SIGTERM); path.unlink(missing_ok=True)
+        signal_process_group(pid); path.unlink(missing_ok=True)
         return emit(result("cancelled", run_id=args.run_id))
     except FileNotFoundError:
         return emit(result(FALLBACK, reason="run_not_active", run_id=args.run_id, next_action="continue_in_claude",
@@ -459,6 +565,11 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    # Results are JSON on stdout and may carry any character the worker emitted;
+    # the console codepage (cp949, cp1252, ...) must not decide what can be printed.
+    for stream in (sys.stdout, sys.stderr):
+        try: stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError): pass
     args = parser().parse_args()
     if getattr(args, "timeout", 1) <= 0 or args.probe_timeout <= 0:
         return emit(result("error", error="timeout_must_be_positive"))
