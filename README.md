@@ -93,6 +93,25 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" restore-user
 
 제거 권장 순서는 `restore-user`, `claude plugin uninstall dex-workers@dex-team --scope user`입니다. uninstall은 `~/.claude/CLAUDE.md`, 백업, opt-out 상태를 자동 삭제하지 않습니다. 과거 전체 파일로 되돌릴 때만 최신 백업을 검토한 뒤 수동 복원하십시오. 프로젝트 하네스 설정은 계속 별도이며 설치/SessionStart로 생성되지 않습니다.
 
+### Antigravity 권한 (setup-agy)
+
+headless `agy`는 `permissions.allow`에 없는 도구를 자동 거부하므로, `git diff`가 필요한 리뷰가 빈 결과로 끝날 수 있습니다. 하네스가 읽기 전용 워커에게 기대하는 검사 명령만 allow-list에 추가합니다. 기존 규칙과 다른 키는 보존하고 먼저 백업합니다.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-agy --dry-run
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-agy                 # git diff grep sed awk cut tr xargs pwd echo printf test which jq du realpath readlink date ...
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-agy --with-verify   # + python3 pytest node npm npx pnpm yarn go cargo make (프로젝트 코드를 실행하므로 opt-in)
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-agy --prune-trusted # 존재하지 않는 trustedWorkspaces 항목 정리
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-agy --unsandboxed    # 검사 명령을 샌드박스 밖에서도 허용 (아래 참고)
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup.py" setup-agy --workspace "$PWD"  # read_file(<repo>) + read_file(<repo>/**) 부여
+```
+
+headless agy는 파일 읽기와 디렉터리 나열에도 `read_file` 허용이 필요합니다. 리뷰할 **저장소 루트**를 `--workspace`로 지정하십시오(반복 가능). 상위 디렉터리에 대한 글롭(`~/projects/**`)은 agy가 인정하지 않는 것으로 확인되어 저장소마다 지정해야 합니다. 이 옵션 없이 실행하면 `stderr`에 `a tool required the "read_file" permission`이 나오고 결과의 `denied_actions`에 `ListDir`/`ViewFile`이 보입니다.
+
+`stderr`에 `a tool required the "unsandboxed" permission`이 나오면 `command(...)` 허용은 됐지만 agy 터미널 샌드박스 구성이 실패한 경우입니다. 샌드박스는 `trustedWorkspaces` 전부를 읽기 전용으로 마운트하는데 Google Drive·iCloud 같은 클라우드 동기화 경로가 있으면 `sandbox configuration error: readonly ...`로 실패하고, 이후 모든 샌드박스 명령이 실패합니다. 해결은 둘 중 하나입니다. 해당 경로를 `trustedWorkspaces`에서 빼거나, `--unsandboxed`로 `git diff grep cat ...` 같은 순수 검사 명령만 샌드박스 밖 실행을 허용하는 것입니다. `sed`, `awk`, `xargs`, `find`는 읽기 용법에서도 파일을 바꿀 수 있어 이 티어에서 제외됩니다. plan 모드는 셸 명령의 파일 쓰기를 막지 못하므로 이 티어는 필요할 때만 켜십시오.
+
+`dex-workers doctor`의 `providers.agy.harness_permissions`가 `missing: ...`이면 위 명령이 필요합니다. 셸(`sh`, `bash`)이나 쓰기 명령은 어떤 티어에도 포함되지 않습니다.
+
 ### Portable minimal harness
 
 플러그인에는 프로젝트 중립적인 최소 하네스가 포함됩니다. 프로젝트마다 명시적으로 `/dex-workers:setup-project`를 실행해야 하며, 플러그인 설치만으로 `.harness`가 생성되지는 않습니다. 생성물은 `.harness/JOURNAL.md`, `plans/`, `runs/`, `templates/run.md`, `README.md`, `config`, `verify`입니다. 기존 `CLAUDE.md`, `AGENTS.md`, `.harness` 파일을 덮어쓰지 않고 충돌 시 아무것도 변경하지 않습니다.
