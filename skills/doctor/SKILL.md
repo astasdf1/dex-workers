@@ -5,4 +5,4 @@ allowed-tools: Bash
 disable-model-invocation: true
 ---
 
-Run `${CLAUDE_PLUGIN_ROOT}/bin/dex-workers doctor`. Explain provider eligibility and the advisory route. Never print environment variables or credential files.
+Run `${CLAUDE_PLUGIN_ROOT}/bin/dex-workers doctor`. Explain provider eligibility and the advisory route. Never print environment variables or credential files. If `providers.agy.harness_permissions` starts with `missing:`, recommend `setup.py setup-agy`.

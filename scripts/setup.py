@@ -30,6 +30,30 @@ PROTOCOL = f"""{BEGIN}
 """
 
 STATE_DIR = "dex-workers"
+
+# Antigravity headless runs auto-deny any tool that is not allow-listed, so a
+# read-only review that wants `git diff` silently returns nothing.  These are
+# the commands the dex-workers harness expects a read-only worker to have:
+# inspection only, nothing that writes, installs, or opens a shell.
+AGY_SETTINGS = Path(".gemini/antigravity-cli/settings.json")
+AGY_INSPECT_COMMANDS = (
+    "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "file", "stat", "sort", "uniq",
+    "basename", "dirname", "tree", "git", "diff", "sed", "awk", "cut", "tr", "xargs", "pwd",
+    "echo", "printf", "test", "which", "jq", "du", "realpath", "readlink", "date",
+)
+# Verification runners for the audit role.  Opt-in: they execute project code.
+AGY_VERIFY_COMMANDS = ("python3", "pytest", "node", "npm", "npx", "pnpm", "yarn", "go", "cargo", "make")
+# agy's terminal sandbox mounts every trusted workspace read-only and fails to
+# configure when one of them is a cloud-synced mount (Google Drive, iCloud), after
+# which every sandboxed command errors and the agent asks for `unsandboxed`.
+# This opt-in tier lets the pure inspection commands run outside the sandbox.
+# Tools that can rewrite files even in "read" usage (sed -i, awk redirection,
+# xargs, find -delete) are deliberately left out.
+AGY_UNSANDBOXED_COMMANDS = (
+    "git", "diff", "grep", "rg", "cat", "head", "tail", "wc", "ls", "stat", "file", "sort", "uniq",
+    "tr", "cut", "jq", "pwd", "echo", "printf", "test", "which", "date", "du", "realpath", "readlink",
+    "basename", "dirname", "tree",
+)
 DISABLED_STATE = "auto-policy.disabled"
 LOCK_DIR = "auto-policy.lock"
 
@@ -224,6 +248,93 @@ def restore_defaults(home: Path) -> int:
     finally:
         release_policy_lock(lock)
 
+def agy_rules(with_verify: bool, unsandboxed: bool = False, workspaces: list[Path] | None = None) -> list[str]:
+    names = AGY_INSPECT_COMMANDS + (AGY_VERIFY_COMMANDS if with_verify else ())
+    rules = [f"command({name})" for name in names]
+    if unsandboxed:
+        rules += [f"unsandboxed({name})" for name in AGY_UNSANDBOXED_COMMANDS]
+    # Headless agy also needs an explicit read_file grant for the workspace it
+    # reviews; without one every file read is auto-denied.  Observed with agy
+    # 2026-09: the rule must name the repository root itself (a glob on a parent
+    # directory is not honoured), `<root>/**` covers ViewFile and `<root>` alone
+    # is what ListDir on the root checks.
+    for workspace in workspaces or []:
+        rules += [f"read_file({workspace})", f"read_file({workspace}/**)"]
+    return rules
+
+
+def setup_agy(home: Path, mode: str, with_verify: bool = False, prune_trusted: bool = False,
+              settings: Path | None = None, unsandboxed: bool = False,
+              workspaces: list[Path] | None = None) -> int:
+    """Merge the harness allow-list into Antigravity's settings.json.
+
+    Additive and idempotent: existing rules, unknown keys and ordering are kept,
+    a timestamped backup is taken before the first write, and a file that is not
+    a JSON object is reported rather than replaced.
+    """
+    path = safe_root(settings if settings is not None else home / AGY_SETTINGS)
+    document: dict = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"dex-workers: cannot parse {path}: {exc}; no changes made", file=sys.stderr); return 2
+        if not isinstance(loaded, dict):
+            print(f"dex-workers: {path} is not a JSON object; no changes made", file=sys.stderr); return 2
+        document = loaded
+    permissions = document.get("permissions")
+    if permissions is None:
+        permissions = {}
+    if not isinstance(permissions, dict):
+        print(f"dex-workers: permissions in {path} is not an object; no changes made", file=sys.stderr); return 2
+    allow = permissions.get("allow")
+    if allow is None:
+        allow = []
+    if not isinstance(allow, list):
+        print(f"dex-workers: permissions.allow in {path} is not a list; no changes made", file=sys.stderr); return 2
+    present = {rule for rule in allow if isinstance(rule, str)}
+    roots = []
+    for workspace in workspaces or []:
+        root = safe_root(workspace)
+        if not root.is_dir():
+            print(f"dex-workers: workspace is not a directory: {workspace}; no changes made", file=sys.stderr); return 2
+        roots.append(root)
+    missing = [rule for rule in agy_rules(with_verify, unsandboxed, roots) if rule not in present]
+    pruned: list[str] = []
+    trusted = document.get("trustedWorkspaces")
+    if prune_trusted and isinstance(trusted, list):
+        keep = []
+        for entry in trusted:
+            if isinstance(entry, str) and not Path(entry).exists():
+                pruned.append(entry)
+            else:
+                keep.append(entry)
+        trusted = keep
+    changed = bool(missing or pruned)
+    if mode == "check":
+        return 0 if not changed else 1
+    if not changed:
+        print(f"already current: {path}"); return 0
+    for rule in missing:
+        print(f"{'would allow' if mode == 'dry-run' else 'allow'}: {rule}")
+    if pruned:
+        print(f"{'would prune' if mode == 'dry-run' else 'prune'}: {len(pruned)} stale trusted workspace entries")
+    if mode == "dry-run":
+        print(f"would update {path}"); return 0
+    permissions["allow"] = allow + missing
+    document["permissions"] = permissions
+    if prune_trusted and isinstance(trusted, list):
+        document["trustedWorkspaces"] = trusted
+    if path.exists():
+        print(f"backup: {backup(path)}")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    print(f"updated: {path}")
+    return 0
+
+
 def session_start(home: Path) -> int:
     """Fail-open, non-waiting first-session installer used by the async plugin hook."""
     try:
@@ -275,13 +386,19 @@ def setup_project(target: Path, mode: str) -> int:
     print(f"project harness ready: {target / '.harness'}"); return 0
 
 def main() -> int:
-    p=argparse.ArgumentParser(); p.add_argument("command", choices=("setup-user","setup-project","session-start","disable-auto-policy","enable-auto-policy","restore-user"))
+    p=argparse.ArgumentParser(); p.add_argument("command", choices=("setup-user","setup-project","setup-agy","session-start","disable-auto-policy","enable-auto-policy","restore-user"))
     p.add_argument("--home", type=Path, default=Path.home()); p.add_argument("--target", type=Path, default=Path.cwd())
     group=p.add_mutually_exclusive_group(); group.add_argument("--dry-run", action="store_true"); group.add_argument("--check", action="store_true")
+    p.add_argument("--with-verify", action="store_true", help="setup-agy: also allow test runners (python3, pytest, npm, go, ...)")
+    p.add_argument("--prune-trusted", action="store_true", help="setup-agy: drop trustedWorkspaces entries whose directory no longer exists")
+    p.add_argument("--workspace", type=Path, action="append", default=None, help="setup-agy: grant read_file(<dir>/**) for a workspace root (repeatable)")
+    p.add_argument("--unsandboxed", action="store_true", help="setup-agy: also allow the inspection commands outside agy's terminal sandbox (needed when the sandbox cannot mount a cloud-synced trusted workspace)")
+    p.add_argument("--agy-settings", type=Path, default=None, help="setup-agy: settings.json path (default ~/.gemini/antigravity-cli/settings.json)")
     a=p.parse_args(); mode="check" if a.check else "dry-run" if a.dry_run else "apply"
     try:
         if a.command == "setup-user": return update_defaults(a.home, mode)
         if a.command == "setup-project": return setup_project(a.target, mode)
+        if a.command == "setup-agy": return setup_agy(a.home, mode, a.with_verify, a.prune_trusted, a.agy_settings, a.unsandboxed, a.workspace)
         if a.command == "session-start": return session_start(a.home)
         if a.command == "disable-auto-policy": return disable_auto_policy(a.home)
         if a.command == "enable-auto-policy": return enable_auto_policy(a.home)

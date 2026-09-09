@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 CACHE_SCHEMAS = frozenset({"dex.provider_usage_cache.v1", "dex.provider_usage_cache.v2", "dex.provider_usage_cache.v3"})
 RESULT_SCHEMA = "dex.external_worker_result.v1"
 SELECTION_SCHEMA = "dex.worker_selection.v1"
@@ -223,6 +223,30 @@ def redact_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): redact_value(item) for key, item in value.items()}
     return value
+
+
+AGY_SETTINGS = Path(".gemini/antigravity-cli/settings.json")
+AGY_HARNESS_COMMANDS = ("git", "diff", "grep", "cat", "ls", "find", "sed", "awk")
+
+
+def agy_missing_permissions(home: Path) -> list[str] | None:
+    """Harness commands agy would auto-deny headlessly, or None when unreadable.
+
+    `setup.py setup-agy` adds them; doctor reports them so an empty review is
+    explained before it happens.
+    """
+    path = home / AGY_SETTINGS
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 1_048_576:
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    allow = data.get("permissions", {}).get("allow") if isinstance(data, dict) else None
+    if not isinstance(allow, list):
+        return list(AGY_HARNESS_COMMANDS)
+    present = {rule for rule in allow if isinstance(rule, str)}
+    return [name for name in AGY_HARNESS_COMMANDS if f"command({name})" not in present]
 
 
 def probe(provider: str, timeout: float = 5.0) -> dict[str, Any]:
@@ -742,6 +766,13 @@ def parse_agy_output(stdout: str) -> dict[str, Any]:
         parsed["usage"] = usage
     if isinstance(document.get("status"), str):
         parsed["provider_status"] = document["status"]
+    denied = document.get("denied_actions")
+    if isinstance(denied, list) and denied:
+        # Headless agy auto-denies tools that are not allow-listed; naming them
+        # tells the caller which `setup.py setup-agy` option is missing.
+        parsed["denied_actions"] = [
+            {key: item[key] for key in ("action", "display_name") if isinstance(item.get(key), str)}
+            for item in denied if isinstance(item, dict)]
     return parsed
 
 
@@ -987,7 +1018,7 @@ def run_worker(args: argparse.Namespace) -> int:
         parsed = parse_agy_output(stdout)
         if parsed["parsed"]:
             output = parsed.get("output", stdout)
-            for key in ("session_id", "usage", "structured", "provider_status"):
+            for key in ("session_id", "usage", "structured", "provider_status", "denied_actions"):
                 if key in parsed:
                     extra[key] = parsed[key]
     if schema is not None and extra.get("structured") is None:
@@ -995,7 +1026,10 @@ def run_worker(args: argparse.Namespace) -> int:
     if not output.strip() and extra.get("structured") is None:
         # agy in headless mode reports SUCCESS with an empty response when a
         # tool permission was auto-denied; an empty answer is not a result.
+        hint = ("permissions were auto-denied; run setup.py setup-agy (see denied_actions)"
+                if extra.get("denied_actions") else None)
         return emit(result(FALLBACK, **common, reason="empty_output", next_action="continue_in_claude",
+                           denied_actions=extra.get("denied_actions"), hint=hint,
                            stderr=redact(stderr[-4000:]) or None,
                            message="External worker returned no output; Claude should continue locally."))
     if extra.get("structured") is not None:
@@ -1091,6 +1125,11 @@ def status(args: argparse.Namespace) -> int:
     usage = load_usage(args.home)
     probes = {name: probe(name, args.probe_timeout) for name in PROVIDERS}
     ready, reason = choose_delegation(probes, usage, "status")
+    if probes["agy"].get("available"):
+        missing = agy_missing_permissions(args.home)
+        probes["agy"]["harness_permissions"] = (
+            "unknown" if missing is None else "ready" if not missing
+            else "missing: " + ", ".join(missing) + " (run setup.py setup-agy)")
     root = state_root(args.home)
     state_status = "ready"
     if root.is_symlink() or (root.exists() and not root.is_dir()):

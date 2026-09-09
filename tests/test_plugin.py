@@ -699,12 +699,14 @@ class DexWorkersTest(unittest.TestCase):
             self.tool(tools, "agy", '''\
                 if [ "$1" = models ]; then echo model
                 elif [ "$1" = --help ]; then echo "--print --print-timeout --sandbox --output-format"
-                else echo '{"conversation_id":"c","status":"SUCCESS","response":""}'; echo "permission auto-denied" >&2; fi
+                else echo '{"conversation_id":"c","status":"SUCCESS","response":"","denied_actions":[{"action":"read_file","display_name":"ListDir"}]}'; echo "permission auto-denied" >&2; fi
             ''')
             done = self.call(home, "run", "x", "--provider", "agy", path=str(tools)+":/usr/bin:/bin")
             data = json.loads(done.stdout)
             self.assertEqual(data["status"], "CLAUDE_FALLBACK"); self.assertEqual(data["reason"], "empty_output")
             self.assertIn("auto-denied", data["stderr"])
+            self.assertEqual(data["denied_actions"], [{"action": "read_file", "display_name": "ListDir"}])
+            self.assertIn("setup-agy", data["hint"])
 
     def test_unusable_result_file_is_reported_and_launching_runs_count(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -725,6 +727,76 @@ class DexWorkersTest(unittest.TestCase):
                                      text=True, capture_output=True, env=env, check=False, timeout=8)
             self.assertEqual(json.loads(refused.stdout)["error"], "too_many_active_runs")
             self.assertEqual(json.loads(refused.stdout)["active"], 1)
+
+
+    # --- 1.7.1: Antigravity harness permissions ---
+
+    def test_setup_agy_merges_allow_list_idempotently_and_prunes(self):
+        setup = ROOT / "scripts/setup.py"
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw).resolve(); settings = home / ".gemini/antigravity-cli/settings.json"
+            settings.parent.mkdir(parents=True)
+            existing_dir = home / "keep"; existing_dir.mkdir()
+            settings.write_text(json.dumps({"permissions": {"allow": ["command(ls)", "read_file(/x/**)"], "deny": ["command(rm)"]},
+                                            "trustedWorkspaces": [str(existing_dir), str(home / "gone")], "other": {"k": 1}}))
+            run = lambda *a: subprocess.run([sys.executable, str(setup), "setup-agy", "--home", str(home), *a], text=True, capture_output=True)
+            self.assertEqual(run("--check").returncode, 1)
+            dry = run("--dry-run"); self.assertEqual(dry.returncode, 0); self.assertIn("command(git)", dry.stdout)
+            self.assertNotIn("command(python3)", dry.stdout)
+            self.assertEqual(json.loads(settings.read_text())["permissions"]["allow"], ["command(ls)", "read_file(/x/**)"])
+            self.assertEqual(run().returncode, 0)
+            data = json.loads(settings.read_text()); allow = data["permissions"]["allow"]
+            self.assertEqual(allow[:2], ["command(ls)", "read_file(/x/**)"]); self.assertEqual(allow.count("command(ls)"), 1)
+            for name in ("git", "diff", "grep", "sed", "awk", "jq"): self.assertIn(f"command({name})", allow)
+            for name in ("sh", "bash", "rm", "python3"): self.assertNotIn(f"command({name})", allow)
+            self.assertEqual(data["permissions"]["deny"], ["command(rm)"]); self.assertEqual(data["other"], {"k": 1})
+            self.assertEqual(data["trustedWorkspaces"], [str(existing_dir), str(home / "gone")])
+            self.assertEqual(len(list((settings.parent / "backups").glob("settings.json.before-dex-workers.*"))), 1)
+            self.assertEqual(run("--check").returncode, 0); again = run(); self.assertIn("already current", again.stdout)
+            self.assertEqual(len(list((settings.parent / "backups").glob("*"))), 1)
+            self.assertEqual(run("--with-verify").returncode, 0)
+            self.assertIn("command(python3)", json.loads(settings.read_text())["permissions"]["allow"])
+            self.assertEqual(run("--prune-trusted").returncode, 0)
+            self.assertEqual(json.loads(settings.read_text())["trustedWorkspaces"], [str(existing_dir)])
+            self.assertNotIn("unsandboxed(git)", json.loads(settings.read_text())["permissions"]["allow"])
+            self.assertEqual(run("--unsandboxed").returncode, 0)
+            allow = json.loads(settings.read_text())["permissions"]["allow"]
+            self.assertIn("unsandboxed(git)", allow); self.assertIn("unsandboxed(grep)", allow)
+            for name in ("sed", "awk", "xargs", "find", "python3", "sh"): self.assertNotIn(f"unsandboxed({name})", allow)
+            self.assertEqual(run("--workspace", str(existing_dir)).returncode, 0)
+            allow = json.loads(settings.read_text())["permissions"]["allow"]
+            self.assertIn(f"read_file({existing_dir}/**)", allow); self.assertIn(f"read_file({existing_dir})", allow)
+            self.assertEqual(run("--workspace", str(home / "missing")).returncode, 2)
+            settings.write_text("not json")
+            bad = run(); self.assertEqual(bad.returncode, 2); self.assertEqual(settings.read_text(), "not json")
+            settings.write_text(json.dumps({"permissions": {"allow": "nope"}}))
+            self.assertEqual(run().returncode, 2)
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw).resolve()
+            fresh = subprocess.run([sys.executable, str(setup), "setup-agy", "--home", str(home)], text=True, capture_output=True)
+            self.assertEqual(fresh.returncode, 0, fresh.stderr)
+            data = json.loads((home / ".gemini/antigravity-cli/settings.json").read_text())
+            self.assertIn("command(git)", data["permissions"]["allow"])
+
+    def test_doctor_reports_agy_harness_permissions(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw).resolve(); settings = home / ".gemini/antigravity-cli/settings.json"; settings.parent.mkdir(parents=True)
+            self.assertIsNone(module.agy_missing_permissions(home))
+            settings.write_text(json.dumps({"permissions": {"allow": ["command(git)", "command(cat)"]}}))
+            missing = module.agy_missing_permissions(home)
+            self.assertNotIn("git", missing); self.assertIn("diff", missing)
+            tools = home / "tools"; tools.mkdir()
+            self.tool(tools, "agy", '''
+                if [ "$1" = models ]; then echo model
+                elif [ "$1" = --help ]; then echo "--print --print-timeout --sandbox"
+                else exit 9; fi
+            ''')
+            data = json.loads(self.call(home, "doctor", path=str(tools)+":/usr/bin:/bin").stdout)
+            self.assertTrue(data["providers"]["agy"]["harness_permissions"].startswith("missing: diff"))
+            subprocess.run([sys.executable, str(ROOT / "scripts/setup.py"), "setup-agy", "--home", str(home)], check=True, capture_output=True)
+            data = json.loads(self.call(home, "doctor", path=str(tools)+":/usr/bin:/bin").stdout)
+            self.assertEqual(data["providers"]["agy"]["harness_permissions"], "ready")
 
 
 if __name__ == "__main__": unittest.main()
