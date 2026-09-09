@@ -12,8 +12,31 @@ claude --plugin-dir "$PWD/plugins/dex-workers"
 - 로컬에 설치·로그인된 Antigravity는 별도 실행 승인 없이 일반 자동 후보로 `agy`를 실행합니다. 인증정보를 추출하거나 복사하지 않습니다.
 - `/dex-workers:run <작업>`: 선택·실행을 수동 진단할 때만 선택적으로 사용합니다.
 - `/dex-workers:review <검토 관점>`: 일반 단일 리뷰 또는 3-provider 다관점 리뷰를 요청합니다. 다관점 모드는 Claude native, Codex, Antigravity를 모두 사용하되 신뢰 가능한 잔량이 5% 미만인 provider만 제외합니다. 잔량 미상인 준비된 Antigravity는 포함됩니다.
+- `/dex-workers:wait <run-id>...`: `--background`로 시작한 실행의 결과를 수거합니다.
 - `/dex-workers:doctor`, `/dex-workers:status`: 설치·로그인·라우팅 상태를 진단합니다.
 - `/dex-workers:cancel <run-id>`: 이 플러그인이 관리 중인 프로세스 그룹만 종료합니다. 다른 터미널이나 병렬 Claude 세션에서 실행 중인 작업을 취소할 때 사용합니다.
+
+### 워커 옵션 (1.7.0)
+
+| 옵션 | 동작 |
+| --- | --- |
+| `--model <name>` | provider 모델 지정. `gpt-5.5-high`, `gpt-5.5:high`, `codex/gpt-5.5`, `gpt-5.5[1m]` 표기를 모두 받아들이며 접미사는 effort를 고정합니다. |
+| `--effort <level>` | `minimal/low/medium/high/xhigh/max`. provider가 지원하는 범위로 clamp됩니다(Codex는 `xhigh`까지, Antigravity는 `high`까지). |
+| `--role review\|audit\|implementation` | 기본 effort를 정합니다(review=low, audit=high, implementation=provider 기본). `select` 결과의 `suggested_effort`와 같습니다. |
+| `--resume <session_id>` | 이전 결과의 `session_id`로 같은 Codex 스레드 또는 agy 대화를 이어갑니다. 결과의 `resume_hint`를 그대로 붙이면 됩니다. Codex 세션은 이제 기본 보존되며 `--ephemeral`로 끌 수 있습니다. |
+| `--findings` / `--schema <file>` | 구조화 출력. `--findings`는 번들된 `schemas/findings.schema.json`(file, line, severity, summary, failure_scenario, confidence)을 사용하고 결과의 `structured`로 파싱되어 돌아옵니다. |
+| `--image <file>` | 이미지 첨부(반복 가능). Codex는 `-i`로 전달하고, agy는 경로를 프롬프트에 명시합니다. |
+| `--brief`, `--deliverable`, `--done-when`, `--context <file>` | 표준 핸드오프 템플릿으로 프롬프트를 감쌉니다. 작업 범위, 접근 권한, 산출물, 완료 기준, `git status`/`diff --stat` 요약, 첨부 파일 내용(각 32KB, 총 128KB)을 포함합니다. |
+| `--background` | 즉시 `run_id`를 반환하고 결과를 상태 디렉터리에 씁니다. `dex-workers wait <run_id>...` 또는 `dex-workers result <run_id>`로 수거합니다. 동시 실행은 `DEX_WORKERS_MAX_ACTIVE`(기본 5)로 제한됩니다. |
+
+```bash
+plugins/dex-workers/bin/dex-workers run "테스트 실패 원인 분석" --cwd "$PWD" --provider codex --model gpt-5.5 --effort high --brief
+plugins/dex-workers/bin/dex-workers review "보안 회귀" --cwd "$PWD" --findings --background   # → run_id
+plugins/dex-workers/bin/dex-workers wait 1757400000-12345 --timeout 1200
+plugins/dex-workers/bin/dex-workers run "방금 지적한 2번을 다시 확인" --cwd "$PWD" --resume <session_id> --provider codex
+```
+
+플러그인은 `codex-reviewer`, `codex-implementer`, `codex-auditor` 에이전트 정의도 제공합니다. 메인 Claude가 `Task`(Agent) 도구로 `dex-workers:codex-reviewer`처럼 호출하면 에이전트가 위 launcher를 대신 실행하고 요약만 컨텍스트에 남깁니다.
 
 모든 실행은 기본 읽기 전용입니다. 파일 변경은 사용자가 명시적으로 허용한 경우에만 `run ... --write`를 지정해야 합니다. `review`는 항상 읽기 전용입니다. 실행 파일이 없거나, 로그인되지 않았거나, 현재 CLI가 지원되지 않거나, 실행 실패/시간 초과가 발생하면 JSON `status: CLAUDE_FALLBACK`을 반환합니다. 이 결과는 Claude가 작업을 직접 계속하라는 의미입니다.
 
@@ -35,6 +58,8 @@ Antigravity에는 신뢰할 수 있는 headless quota 계약이 없으므로 숫
 ## English guide
 
 Load with `claude --plugin-dir "$PWD/plugins/dex-workers"`. On the first SessionStart after enablement, an official async plugin hook safely installs the managed delegation-first block in `~/.claude/CLAUDE.md`; because it is asynchronous, the newly written policy is guaranteed for later sessions, not necessarily the session already loading. It preserves unrelated content, creates a timestamped backup, is idempotent, fails open, and refuses malformed or duplicate managed markers. Claude remains the main agent and routes bounded subtasks through the auto-invocable `delegate` skill.
+
+Workers accept `--model` (with `gpt-5.5-high` style effort suffixes), `--effort` (clamped per provider), `--role` (default effort per role), `--resume <session_id>` (continue a Codex thread or agy conversation), `--findings`/`--schema` (structured output returned as `structured`), `--image`, `--brief` with `--deliverable`/`--done-when`/`--context` (a standard handoff template with git state), and `--background` with `wait`/`result` for parallel runs (at most `DEX_WORKERS_MAX_ACTIVE`, default 5). Plugin agents `codex-reviewer`, `codex-implementer` and `codex-auditor` wrap the launcher for `Task` callers.
 
 Runs are read-only by default. A workspace-writing run requires an explicit, user-authorized `run ... --write`; `review` is always read-only. Automatic routing excludes missing, unauthenticated, or unsupported CLIs; a valid `dex-usage` cache is advisory. Any unavailable route, launch failure, timeout, or worker failure returns a clear `CLAUDE_FALLBACK` result so Claude can continue locally. Cancellation targets only a run ID created by this wrapper. Provider output is captured as structured JSON; credentials and environment contents are never logged.
 

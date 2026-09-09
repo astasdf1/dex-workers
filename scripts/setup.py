@@ -23,6 +23,7 @@ PROTOCOL = f"""{BEGIN}
 - Run at most 5 delegated subtasks concurrently.
 - Allow only one writer per worktree; independent read-only subtasks may run in parallel.
 - Workers must not recursively delegate. Preserve direct handling for trivial checks, tightly coupled conversational work, and work that cannot be isolated safely.
+- Give each worker a brief (`--brief`), ask reviews for structured findings (`--findings`), run independent workers with `--background` and collect them with `wait`, and continue a worker with `--resume <session>` instead of re-spawning it.
 - Route through the dex-workers `delegate` skill. Prefer Claude/Codex for implementation and deep or high-risk audits, Antigravity for ordinary reviews, and all eligible providers for multi-perspective review.
 - Explicit user instructions such as `directly handle`, `no delegation`, `Claude only`, `Codex`, or `Antigravity` override these defaults.
 {END}
