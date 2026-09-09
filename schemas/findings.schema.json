@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "dex.worker_findings.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "One or two sentences: overall verdict and the most important finding."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "pass_with_notes", "fail", "blocked"],
+      "description": "pass: no defects; pass_with_notes: only low severity; fail: at least one high or medium defect; blocked: the task could not be completed."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "severity", "category", "summary", "failure_scenario"],
+        "properties": {
+          "file": {"type": "string", "description": "Workspace-relative path, or empty when not file specific."},
+          "line": {"type": "integer", "description": "1-indexed line the finding anchors to; 0 when unknown."},
+          "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+          "category": {"type": "string", "description": "Short kebab-case slug such as correctness, security, efficiency, test-coverage, simplification."},
+          "summary": {"type": "string", "description": "One sentence stating the defect."},
+          "failure_scenario": {"type": "string", "description": "Concrete input or state that leads to the wrong output or crash."},
+          "confidence": {"type": "string", "enum": ["confirmed", "plausible"], "description": "confirmed when verified against the code, plausible otherwise."}
+        }
+      }
+    },
+    "verification": {
+      "type": "string",
+      "description": "Commands run or evidence read to support the verdict."
+    }
+  }
+}
